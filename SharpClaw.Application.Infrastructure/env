@@ -1,0 +1,26 @@
+{
+  // SharpClaw Environment Configuration
+  // Values here are loaded for all environments.
+
+  // ── Encryption ─────────────────────────────────────────────────
+  // Base64-encoded 256-bit key for API key encryption at rest.
+  // If not set, a key is auto-generated and persisted locally.
+  //"Encryption": { "Key": "" },
+
+  // ── JWT ────────────────────────────────────────────────────────
+  // Base64-encoded secret for signing JWT access tokens.
+  // If not set, a secret is auto-generated and persisted locally.
+  //"Jwt": { "Secret": "" },
+
+  // ── Database ───────────────────────────────────────────────────
+  // Postgres connection string (only used when StorageMode=Postgres).
+  //"ConnectionStrings": { "Postgres": "Host=localhost;Database=sharpclaw;Username=sharpclaw;Password=" },
+
+  // ── API Server ─────────────────────────────────────────────────
+  // Listen URL for the localhost API.
+  //"Api": { "ListenUrl": "http://127.0.0.1:48923" },
+
+  // ── Admin Seed ──────────────────────────────────────────────────
+  // Credentials used to seed the initial admin user on first launch.
+  "Admin": { "Username": "admin", "Password": "123456" }
+}
