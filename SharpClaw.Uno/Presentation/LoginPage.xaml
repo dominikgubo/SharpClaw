@@ -4,33 +4,124 @@
       xmlns:local="using:SharpClaw.Presentation"
       xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
       xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
-      xmlns:uen="using:Uno.Extensions.Navigation.UI"
-      xmlns:utu="using:Uno.Toolkit.UI"
       mc:Ignorable="d"
       NavigationCacheMode="Required"
-      Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+      Background="Black">
 
-  <Grid utu:SafeArea.Insets="VisibleBounds">
-    <Grid.RowDefinitions>
-      <RowDefinition Height="Auto" />
-      <RowDefinition />
-    </Grid.RowDefinitions>
-    <utu:NavigationBar Content="{Binding Title}" />
+  <Grid
+        VerticalAlignment="Stretch">
 
-    <StackPanel Grid.Row="1"
-          HorizontalAlignment="Center"
-          VerticalAlignment="Center"
-          Width="200"
-          Spacing="16">
-      <TextBox Text="{Binding Username, Mode=TwoWay}"
-          PlaceholderText="Username"
-          HorizontalAlignment="Stretch" />
-      <PasswordBox Password="{Binding Password, Mode=TwoWay}"
-            PlaceholderText="Password"
-            HorizontalAlignment="Stretch" />
-      <Button Content="Login"
-          Command="{Binding Login}"
-          HorizontalAlignment="Stretch" />
+    <StackPanel HorizontalAlignment="Center"
+                VerticalAlignment="Center"
+                Spacing="8"
+                MinWidth="380"
+                MaxWidth="480">
+
+      <!-- Title -->
+      <TextBlock Text="SharpClaw"
+                 Style="{StaticResource TerminalText}"
+                 FontSize="28"
+                 FontWeight="Bold"
+                 Foreground="#00FF00"
+                 HorizontalAlignment="Center"
+                 Margin="0,0,0,8" />
+
+      <!-- Mode header -->
+      <TextBlock x:Name="HeaderBlock"
+                 Text="> Authenticate to continue"
+                 Style="{StaticResource TerminalText}"
+                 FontSize="14"
+                 Foreground="#808080"
+                 Margin="0,0,0,12" />
+
+      <!-- First-setup disclaimer (shown only when setup not yet completed) -->
+      <Border x:Name="SetupDisclaimer"
+              Background="#1A1A0A"
+              BorderBrush="#333300"
+              BorderThickness="1"
+              CornerRadius="4"
+              Padding="10,8"
+              Margin="0,0,0,12"
+              Visibility="Collapsed">
+        <TextBlock Style="{StaticResource TerminalText}"
+                   FontSize="11"
+                   Foreground="#CCCC66"
+                   TextWrapping="Wrap"
+                   Text="Default admin credentials: username admin, password 123456 unless otherwise configured in SharpClaw.Application/Environments/.env. You are encouraged to change them after finishing first-time setup." />
+      </Border>
+
+      <!-- Username -->
+      <TextBlock Text="username:"
+                 Style="{StaticResource TerminalText}"
+                 FontSize="13"
+                 Foreground="#CCCCCC" />
+      <TextBox x:Name="UsernameBox"
+               Style="{StaticResource TerminalInput}"
+               TextChanged="OnCredentialChanged"
+               PlaceholderText="admin"
+               HorizontalAlignment="Stretch" />
+
+      <!-- Password -->
+      <TextBlock Text="password:"
+                 Style="{StaticResource TerminalText}"
+                 FontSize="13"
+                 Foreground="#CCCCCC"
+                 Margin="0,8,0,0" />
+      <PasswordBox x:Name="PasswordBox"
+                   Style="{StaticResource TerminalPasswordInput}"
+                   PasswordChanged="OnCredentialChanged"
+                   PlaceholderText="••••••••"
+                   HorizontalAlignment="Stretch" />
+
+      <!-- Confirm password (register mode only) -->
+      <TextBlock x:Name="ConfirmLabel"
+                 Text="confirm password:"
+                 Style="{StaticResource TerminalText}"
+                 FontSize="13"
+                 Foreground="#CCCCCC"
+                 Margin="0,8,0,0"
+                 Visibility="Collapsed" />
+      <PasswordBox x:Name="ConfirmPasswordBox"
+                   Style="{StaticResource TerminalPasswordInput}"
+                   PlaceholderText="••••••••"
+                   HorizontalAlignment="Stretch"
+                   Visibility="Collapsed" />
+
+      <!-- Status / error message -->
+      <TextBlock x:Name="StatusBlock"
+                 Style="{StaticResource TerminalText}"
+                 FontSize="13"
+                 Foreground="#FF4444"
+                 Visibility="Collapsed"
+                 Margin="0,4,0,0" />
+
+      <!-- Submit button -->
+      <Button x:Name="SubmitButton"
+              Style="{StaticResource TerminalButton}"
+              Click="OnSubmitClick"
+              Margin="0,12,0,0">
+        <TextBlock x:Name="SubmitLabel"
+                   Text="[ Login ]"
+                   Style="{StaticResource TerminalText}"
+                   FontSize="14"
+                   Foreground="#00FF00"
+                   HorizontalAlignment="Center" />
+      </Button>
+
+      <!-- Toggle mode link -->
+      <Button x:Name="ToggleModeButton"
+              Style="{StaticResource TerminalLink}"
+              Click="OnToggleModeClick"
+              Margin="0,4,0,0">
+        <TextBlock x:Name="ToggleModeLabel"
+                   Text="> No account? Register"
+                   Style="{StaticResource TerminalText}"
+                   FontSize="12"
+                   Foreground="#808080" />
+      </Button>
+
+      <!-- Cursor -->
+      <local:TerminalCursor x:Name="Cursor" Margin="0,8,0,0" />
     </StackPanel>
   </Grid>
 </Page>

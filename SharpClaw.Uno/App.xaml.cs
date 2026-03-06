@@ -1,3 +1,5 @@
+using SharpClaw.Configuration;
+using SharpClaw.Services;
 using SharpClaw.Uno;
 using Uno.Resizetizer;
 
@@ -14,8 +16,10 @@ public partial class App : Application
         this.InitializeComponent();
     }
 
-    protected Window? MainWindow { get; private set; }
-    protected IHost? Host { get; private set; }
+    internal Window? MainWindow { get; private set; }
+    internal IHost? Host { get; private set; }
+
+    internal static IServiceProvider? Services { get; private set; }
 
     protected async override void OnLaunched(LaunchActivatedEventArgs args)
     {
@@ -107,8 +111,12 @@ public partial class App : Application
                 )
                 .ConfigureServices((context, services) =>
                 {
-                    // TODO: Register your services
-                    //services.AddSingleton<IMyService, MyService>();
+                    var isDev = context.HostingEnvironment.IsDevelopment();
+                    var apiUrl = LocalEnvironment.LoadApiUrl(isDev);
+
+                    var backendManager = new BackendProcessManager(apiUrl);
+                    services.AddSingleton(backendManager);
+                    services.AddSingleton(new SharpClawApiClient(apiUrl));
                 })
                 .UseNavigation(ReactiveViewModelMappings.ViewModelMappings, RegisterRoutes)
             );
@@ -117,30 +125,39 @@ public partial class App : Application
 #if DEBUG
         MainWindow.UseStudio();
 #endif
-        MainWindow.SetWindowIcon();
+        SetWindowIconFromFile(MainWindow);
 
         Host = await builder.NavigateAsync<Shell>
             (initialNavigate: async (services, navigator) =>
             {
-                var auth = services.GetRequiredService<IAuthenticationService>();
-                var authenticated = await auth.RefreshAsync();
-                if (authenticated)
-                {
-                    await navigator.NavigateViewModelAsync<MainModel>(this, qualifier: Qualifiers.Nested);
-                }
-                else
-                {
-                    await navigator.NavigateViewModelAsync<LoginModel>(this, qualifier: Qualifiers.Nested);
-                }
+                // Capture the service provider early — Host is not yet
+                // assigned at this point, but BootPage needs services.
+                Services = services;
+
+                // Show the terminal-style boot screen which handles
+                // connection, retry, and then navigates to Login/Main.
+                await navigator.NavigateRouteAsync(this, "Boot", qualifier: Qualifiers.Nested);
             });
+
+        // Stop the backend process when the app window closes.
+        if (MainWindow is not null)
+        {
+            MainWindow.Closed += (_, _) =>
+            {
+                Host?.Services.GetService<BackendProcessManager>()?.Dispose();
+            };
+        }
     }
 
     private static void RegisterRoutes(IViewRegistry views, IRouteRegistry routes)
     {
         views.Register(
             new ViewMap(ViewModel: typeof(ShellModel)),
-            new ViewMap<LoginPage, LoginModel>(),
-            new ViewMap<MainPage, MainModel>(),
+            new ViewMap<BootPage>(),
+            new ViewMap<LoginPage>(),
+            new ViewMap<FirstSetupPage>(),
+            new ViewMap<MainPage>(),
+            new ViewMap<DashboardPage>(),
             new DataViewMap<SecondPage, SecondModel, Entity>()
         );
 
@@ -148,11 +165,36 @@ public partial class App : Application
             new RouteMap("", View: views.FindByViewModel<ShellModel>(),
                 Nested:
                 [
-                    new ("Login", View: views.FindByViewModel<LoginModel>()),
-                    new ("Main", View: views.FindByViewModel<MainModel>(), IsDefault:true),
+                    new ("Boot", View: views.FindByView<BootPage>()),
+                    new ("Login", View: views.FindByView<LoginPage>()),
+                    new ("FirstSetup", View: views.FindByView<FirstSetupPage>()),
+                    new ("Main", View: views.FindByView<MainPage>(), IsDefault:true),
+                    new ("Dashboard", View: views.FindByView<DashboardPage>()),
                     new ("Second", View: views.FindByViewModel<SecondModel>()),
                 ]
             )
         );
+    }
+
+    private static void SetWindowIconFromFile(Window window)
+    {
+        try
+        {
+            var icoPath = Path.Combine(AppContext.BaseDirectory, "Environment", "icon.ico");
+            if (File.Exists(icoPath))
+            {
+                var appWindow = window.AppWindow;
+                appWindow.SetIcon(icoPath);
+            }
+            else
+            {
+                // Fall back to Resizetizer-generated icon
+                window.SetWindowIcon();
+            }
+        }
+        catch
+        {
+            window.SetWindowIcon();
+        }
     }
 }
