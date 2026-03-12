@@ -104,6 +104,7 @@ Custom, Local
 | `Failed` | 4 | Action threw an error |
 | `Denied` | 5 | Agent lacks the required permission |
 | `Cancelled` | 6 | Cancelled by a user or agent |
+| `Paused` | 7 | Temporarily paused; can be resumed |
 
 ### ModelCapability (flags)
 
@@ -135,7 +136,8 @@ Sandboxed DSL — never invokes a real shell interpreter.
 ### ChatClientType
 
 ```
-CLI, API, Telegram, Discord, WhatsApp, VisualStudio, VisualStudioCode, Other
+CLI, API, Telegram, Discord, WhatsApp, VisualStudio, VisualStudioCode,
+UnoWindows, UnoAndroid, UnoMacOS, UnoLinux, UnoBrowser, Other
 ```
 
 Identifies the client interface that originated a chat message. Included
@@ -164,6 +166,14 @@ Pending, Downloading, Ready, Failed
 | `ApprovalResult` | Approval decision has been applied |
 | `Error` | An error occurred during the stream |
 | `Done` | Stream complete; contains the final persisted response |
+
+### TranscriptionMode
+
+| Value | Int | Description |
+|-------|-----|-------------|
+| `SlidingWindow` | 0 | Two-pass sliding window. Segments are emitted provisionally as soon as they pass quality filters, then finalized (or retracted) once the commit delay confirms them. Consumers see text within one inference tick (~3 s) and receive an update when the segment is confirmed. **Default.** |
+| `Simple` | 1 | Sequential non-overlapping chunks. Each chunk transcribed independently, segments emitted immediately. Lower latency, fewer API calls, no cross-window dedup. |
+| `StrictSlidingWindow` | 2 | Single-pass sliding window. Segments only emitted after the full commit delay, deduplication, and hallucination filtering. Higher accuracy but ~5–8 s perceived latency. |
 
 ---
 
@@ -481,9 +491,15 @@ Start an OAuth device code flow for providers that require it (e.g. GitHub Copil
 {
   "name": "string",
   "modelId": "guid",
-  "systemPrompt": "string | null"
+  "systemPrompt": "string | null",
+  "maxCompletionTokens": "integer | null"
 }
 ```
+
+`maxCompletionTokens` caps the number of tokens the model may generate per
+response. Sent as `max_tokens`, `max_completion_tokens`, or
+`max_output_tokens` depending on the provider and API version. `null`
+(default) means no limit — the provider default applies.
 
 **Response `200`:** `AgentResponse`
 
@@ -510,7 +526,8 @@ Start an OAuth device code flow for providers that require it (e.g. GitHub Copil
 {
   "name": "string | null",
   "modelId": "guid | null",
-  "systemPrompt": "string | null"
+  "systemPrompt": "string | null",
+  "maxCompletionTokens": "integer | null"
 }
 ```
 
@@ -534,8 +551,7 @@ Assign a role to an agent.
 
 ```json
 {
-  "roleId": "guid",
-  "callerUserId": "guid"
+  "roleId": "guid"
 }
 ```
 
@@ -556,7 +572,8 @@ Assign a role to an agent.
   "modelName": "string",
   "providerName": "string",
   "roleId": "guid | null",
-  "roleName": "string | null"
+  "roleName": "string | null",
+  "maxCompletionTokens": "integer | null"
 }
 ```
 
@@ -573,7 +590,8 @@ Omits `systemPrompt` to keep payloads compact.
   "modelName": "string",
   "providerName": "string",
   "roleId": "guid | null",
-  "roleName": "string | null"
+  "roleName": "string | null",
+  "maxCompletionTokens": "integer | null"
 }
 ```
 
@@ -707,7 +725,7 @@ Valid keys: `dangshell`, `safeshell`, `container`, `website`, `search`,
 
 `agent` and each entry in `allowedAgents` are full
 [`AgentSummary`](#agentsummary) objects (id, name, modelId, modelName,
-providerName, roleId, roleName).
+providerName, roleId, roleName, maxCompletionTokens).
 
 ### ContextAllowedAgentsResponse
 
@@ -872,7 +890,7 @@ Valid keys: `dangshell`, `safeshell`, `container`, `website`, `search`,
 
 `agent` and each entry in `allowedAgents` are full
 [`AgentSummary`](#agentsummary) objects (id, name, modelId, modelName,
-providerName, roleId, roleName).
+providerName, roleId, roleName, maxCompletionTokens).
 
 ### ChannelAllowedAgentsResponse
 
@@ -1036,7 +1054,7 @@ no history is sent to the model (one-shot). Body:
 {
   "message": "string",
   "agentId": "guid | null",
-  "clientType": "CLI | API | Telegram | Discord | WhatsApp | VisualStudio | VisualStudioCode | Other",
+  "clientType": "CLI | API | Telegram | Discord | WhatsApp | VisualStudio | VisualStudioCode | UnoWindows | UnoAndroid | UnoMacOS | UnoLinux | UnoBrowser | Other",
   "editorContext": {
     "editorType": "VisualStudio2026 | VisualStudioCode | Other",
     "editorVersion": "string | null",
@@ -1179,7 +1197,10 @@ unless overridden via `agentId`.
   "scriptJson": "string | null",
   "workingDirectory": "string | null",
   "transcriptionModelId": "guid | null",
-  "language": "string | null"
+  "language": "string | null",
+  "transcriptionMode": "SlidingWindow | Simple | StrictSlidingWindow | null",
+  "windowSeconds": "int | null",
+  "stepSeconds": "int | null"
 }
 ```
 
@@ -1215,13 +1236,48 @@ For transcription jobs (`TranscribeFromAudioDevice`,
   forwarded to the STT provider. When omitted, the model auto-detects
   the spoken language. **Supplying the correct language code improves
   accuracy and reduces latency** — especially for short audio chunks
-  where auto-detection is unreliable.
+  where auto-detection is unreliable.  When set, the orchestrator
+  enforces the language via prompt seeding: the Whisper prompt is
+  initialised with a natural phrase from an embedded
+  `transcription-language-seeds.json` resource covering all 99
+  Whisper-supported languages. If the API's response-level language
+  tag doesn't match, the chunk is retried up to 4 times with
+  escalating reinforcement (single seed → triple seed → instruction
+  preamble + seed → max saturation block). If all retries still
+  return the wrong language the result is accepted anyway — no audio
+  is ever silently dropped.
+- **`transcriptionMode`** — pipeline mode. `SlidingWindow` (default):
+  two-pass — segments are emitted provisionally within one inference
+  tick, then finalized or retracted once the commit delay confirms
+  them.  `Simple`: sequential non-overlapping chunks, segments emitted
+  immediately.  `StrictSlidingWindow`: single-pass — segments only
+  emitted after the full commit delay + dedup pipeline confirms them
+  (~5–8 s latency).
+- **`windowSeconds`** — seconds of audio sent to Whisper per inference
+  tick. Clamped to [5, 15]. Default 10. Larger windows give more
+  context but cost more per API call.
+- **`stepSeconds`** — seconds between inference ticks (SlidingWindow
+  mode only). Clamped to [1, window]. Default 2. Ignored in Simple
+  mode where step equals window.
 
 > **CLI equivalent:**
-> `job submit <channelId> TranscribeFromAudioDevice <audioDeviceId> --model <id> --lang en`
+> `job submit <channelId> TranscribeFromAudioDevice <audioDeviceId> --model <id> --lang en --mode simple --window 12 --step 4`
+>
+> Mode shortcuts: `sliding` (default, two-pass), `simple`, `strict` (single-pass).
 
 Audio is automatically normalised to mono 16 kHz 16-bit PCM before
 being sent to the transcription model (Whisper-optimal format).
+
+#### Dedup pipeline constants
+
+| Constant | Value | Description |
+|----------|-------|-------------|
+| `WindowSeconds` | 10 | Default audio window per inference tick |
+| `InferenceIntervalSeconds` | 2 | Default step between ticks |
+| `BufferCapacitySeconds` | 15 | Ring buffer size / max window clamp |
+| `CommitDelaySeconds` | 2.0 | Delay before provisional → finalized |
+| `MaxPromptChars` | 500 | Rolling prompt buffer size for Whisper |
+| `SampleRate` | 16 000 | Audio sample rate (mono PCM) |
 
 **Response `200`:** `AgentJobResponse`
 
@@ -1232,6 +1288,33 @@ being sent to the transcription model (Whisper-optimal format).
 List all jobs for a channel.
 
 **Response `200`:** `AgentJobResponse[]`
+
+---
+
+### GET /channels/{channelId}/jobs/summaries
+
+List lightweight summaries for all jobs in a channel. Returns only the
+fields needed for list views / dropdowns — no `resultData`, `errorLog`,
+`logs`, or `segments`. Use this endpoint when you only need to enumerate
+jobs without their heavy payloads.
+
+**Response `200`:** `AgentJobSummaryResponse[]`
+
+```json
+[
+  {
+    "id": "guid",
+    "channelId": "guid",
+    "agentId": "guid",
+    "actionType": "CaptureDisplay",
+    "resourceId": "guid | null",
+    "status": "Completed",
+    "createdAt": "datetime",
+    "startedAt": "datetime | null",
+    "completedAt": "datetime | null"
+  }
+]
+```
 
 ---
 
@@ -1264,6 +1347,7 @@ requirement.
 ### POST /channels/{channelId}/jobs/{jobId}/stop
 
 Stop a long-running transcription job (completes it normally).
+Also accepts `Paused` transcription jobs.
 
 **Response `200`:** `AgentJobResponse`
 **Response `404`:** Not found.
@@ -1272,7 +1356,32 @@ Stop a long-running transcription job (completes it normally).
 
 ### POST /channels/{channelId}/jobs/{jobId}/cancel
 
-Cancel a job that has not yet completed.
+Cancel a job that has not yet completed. Also accepts `Paused` jobs.
+
+**Response `200`:** `AgentJobResponse`
+**Response `404`:** Not found.
+
+---
+
+### PUT /channels/{channelId}/jobs/{jobId}/pause
+
+Pause a long-running job. For transcription jobs this stops the audio
+capture and inference loop so no further API calls (and therefore no
+token costs) are incurred while paused. The job can be resumed later.
+
+Only jobs with status `Executing` can be paused.
+
+**Response `200`:** `AgentJobResponse`
+**Response `404`:** Not found.
+
+---
+
+### PUT /channels/{channelId}/jobs/{jobId}/resume
+
+Resume a previously paused job. For transcription jobs this restarts
+the audio capture and inference loop using the original job parameters.
+
+Only jobs with status `Paused` can be resumed.
 
 **Response `200`:** `AgentJobResponse`
 **Response `404`:** Not found.
@@ -1336,6 +1445,9 @@ Retrieve transcription segments added after the given timestamp.
   "workingDirectory": "string | null",
   "transcriptionModelId": "guid | null",
   "language": "string | null",
+  "transcriptionMode": "SlidingWindow | Simple | StrictSlidingWindow | null",
+  "windowSeconds": "int | null",
+  "stepSeconds": "int | null",
   "segments": [
     {
       "id": "guid",
@@ -1343,7 +1455,8 @@ Retrieve transcription segments added after the given timestamp.
       "startTime": 0.0,
       "endTime": 1.5,
       "confidence": 0.95,
-      "timestamp": "datetime"
+      "timestamp": "datetime",
+      "isProvisional": false
     }
   ]
 }
@@ -1351,6 +1464,74 @@ Retrieve transcription segments added after the given timestamp.
 
 `segments` is only populated for transcription action types; `null`
 otherwise.
+
+#### Two-pass segment lifecycle (SlidingWindow mode)
+
+In the default `SlidingWindow` mode, segments go through a two-pass
+lifecycle:
+
+1. **Provisional** — emitted as soon as the segment passes the dedup
+   pipeline (within one inference tick, ~2 s). `isProvisional: true`.
+   The text may shift slightly in later inference passes.
+
+2. **Finalized** — once the commit delay (2 s) confirms the segment, a
+   second event is pushed with the same `id`, updated `text` /
+   `confidence`, and `isProvisional: false`. Consumers should replace
+   the provisional version in-place.
+
+3. **Retracted** — if a provisional segment is not confirmed within
+   twice the commit delay (likely a hallucination), it is deleted and a
+   tombstone event is pushed with the same `id`, empty `text`, and
+   `isProvisional: false`. Consumers should remove it.
+
+In `StrictSlidingWindow` mode all segments are final on first emission
+(`isProvisional` is always `false`). In `Simple` mode the same applies.
+
+#### Deduplication pipeline (non-timestamped API responses)
+
+When the STT API returns the full window as a single text blob without
+per-word timestamps (e.g. `gpt-4o-transcribe`), the orchestrator uses a
+multi-layer dedup pipeline to extract genuinely new content:
+
+1. **Text diff (`RemoveOverlap`)** — compares the current API response
+   against `previousWindowText` (the last response that produced new
+   content):
+   - *Containment check* — if the current text is a word-level subset
+     of the previous text, it is already-seen content and is skipped.
+     Uses strict matching for short sequences (< 10 words) and 10%
+     fuzzy tolerance (floor) for longer ones to catch minor Whisper
+     hallucinations like "a" → "the".
+   - *Suffix-prefix overlap* — finds the longest suffix of the previous
+     text matching a prefix of the current text, and returns only the
+     tail that is genuinely new.
+
+2. **Context tracking** — `previousWindowText` is updated carefully:
+   - When new text **is** found: always updated to the current response.
+   - When new text is **not** found: only upgraded to a **longer**
+     response (never downgraded to a shorter subset). This prevents
+     context loss that would let already-emitted content slip through
+     as "new" in later ticks.
+
+3. **Sentence splitting** — when multiple sentences accumulate as "new"
+   in a single tick, they are split at sentence boundaries
+   (`[.!?]` + space + uppercase letter). Each sentence becomes its own
+   segment with timestamps distributed proportionally by character
+   count across the available time span. This prevents multi-sentence
+   bursts from being emitted as a single segment.
+
+4. **Fragment merge** — very short residuals (≤ 2 words starting with a
+   lowercase letter) from API truncation at window boundaries are merged
+   into the most recent provisional segment rather than emitted
+   standalone.
+
+5. **Emitted-text guard** — a `HashSet` tracks all emitted segment texts
+   (normalized: trimmed, trailing period stripped, case-insensitive).
+   Any segment whose text was already emitted is skipped at emission
+   time. This catches Whisper hallucination replay where the API
+   regurgitates the entire transcript history as if it were new speech.
+
+6. **Timestamp guard** — segments whose `absEnd ≤ lastSeenEnd` are
+   skipped to prevent backward-looking duplicates.
 
 ---
 

@@ -18,6 +18,10 @@ public static class AgentJobHandlers
     public static async Task<IResult> List(Guid channelId, AgentJobService svc)
         => Results.Ok(await svc.ListAsync(channelId));
 
+    [MapGet("/summaries")]
+    public static async Task<IResult> ListSummaries(Guid channelId, AgentJobService svc)
+        => Results.Ok(await svc.ListSummariesAsync(channelId));
+
     [MapGet("/{jobId:guid}")]
     public static async Task<IResult> GetById(
         Guid channelId, Guid jobId, AgentJobService svc)
@@ -47,6 +51,22 @@ public static class AgentJobHandlers
         Guid channelId, Guid jobId, AgentJobService svc)
     {
         var job = await svc.CancelAsync(jobId);
+        return job is not null ? Results.Ok(job) : Results.NotFound();
+    }
+
+    [MapPut("/{jobId:guid}/pause")]
+    public static async Task<IResult> Pause(
+        Guid channelId, Guid jobId, AgentJobService svc)
+    {
+        var job = await svc.PauseAsync(jobId);
+        return job is not null ? Results.Ok(job) : Results.NotFound();
+    }
+
+    [MapPut("/{jobId:guid}/resume")]
+    public static async Task<IResult> Resume(
+        Guid channelId, Guid jobId, AgentJobService svc)
+    {
+        var job = await svc.ResumeAsync(jobId);
         return job is not null ? Results.Ok(job) : Results.NotFound();
     }
 

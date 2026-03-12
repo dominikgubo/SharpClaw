@@ -26,6 +26,23 @@ public sealed class RoleService(SharpClawDbContext db)
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Creates a new role with an empty permission set.
+    /// </summary>
+    public async Task<RoleResponse> CreateAsync(
+        string name, CancellationToken ct = default)
+    {
+        var ps = new PermissionSetDB();
+        db.PermissionSets.Add(ps);
+        await db.SaveChangesAsync(ct);
+
+        var role = new RoleDB { Name = name, PermissionSetId = ps.Id };
+        db.Roles.Add(role);
+        await db.SaveChangesAsync(ct);
+
+        return new RoleResponse(role.Id, role.Name, role.PermissionSetId);
+    }
+
     public async Task<RoleResponse?> GetByIdAsync(
         Guid roleId, CancellationToken ct = default)
     {
@@ -96,6 +113,8 @@ public sealed class RoleService(SharpClawDbContext db)
             ps.LocalInfoStorePermissions.Clear();
             ps.ExternalInfoStorePermissions.Clear();
             ps.AudioDeviceAccesses.Clear();
+            ps.DisplayDeviceAccesses.Clear();
+            ps.EditorSessionAccesses.Clear();
             ps.AgentPermissions.Clear();
             ps.TaskPermissions.Clear();
             ps.SkillPermissions.Clear();
@@ -111,12 +130,19 @@ public sealed class RoleService(SharpClawDbContext db)
         // Apply global flags.
         ps.DefaultClearance = request.DefaultClearance;
         ps.CanCreateSubAgents = request.CanCreateSubAgents;
+        ps.CreateSubAgentsClearance = request.CreateSubAgentsClearance;
         ps.CanCreateContainers = request.CanCreateContainers;
+        ps.CreateContainersClearance = request.CreateContainersClearance;
         ps.CanRegisterInfoStores = request.CanRegisterInfoStores;
+        ps.RegisterInfoStoresClearance = request.RegisterInfoStoresClearance;
         ps.CanAccessLocalhostInBrowser = request.CanAccessLocalhostInBrowser;
+        ps.AccessLocalhostInBrowserClearance = request.AccessLocalhostInBrowserClearance;
         ps.CanAccessLocalhostCli = request.CanAccessLocalhostCli;
+        ps.AccessLocalhostCliClearance = request.AccessLocalhostCliClearance;
         ps.CanClickDesktop = request.CanClickDesktop;
+        ps.ClickDesktopClearance = request.ClickDesktopClearance;
         ps.CanTypeOnDesktop = request.CanTypeOnDesktop;
+        ps.TypeOnDesktopClearance = request.TypeOnDesktopClearance;
 
         // Apply per-resource grants.
         AddGrants(ps.DangerousShellAccesses, request.DangerousShellAccesses,
@@ -150,6 +176,14 @@ public sealed class RoleService(SharpClawDbContext db)
         AddGrants(ps.AudioDeviceAccesses, request.AudioDeviceAccesses,
             (g, psId) => new AudioDeviceAccessDB
             { PermissionSetId = psId, AudioDeviceId = g.ResourceId, Clearance = g.Clearance });
+
+        AddGrants(ps.DisplayDeviceAccesses, request.DisplayDeviceAccesses,
+            (g, psId) => new DisplayDeviceAccessDB
+            { PermissionSetId = psId, DisplayDeviceId = g.ResourceId, Clearance = g.Clearance });
+
+        AddGrants(ps.EditorSessionAccesses, request.EditorSessionAccesses,
+            (g, psId) => new EditorSessionAccessDB
+            { PermissionSetId = psId, EditorSessionId = g.ResourceId, Clearance = g.Clearance });
 
         AddGrants(ps.AgentPermissions, request.AgentAccesses,
             (g, psId) => new AgentManagementAccessDB
@@ -241,6 +275,10 @@ public sealed class RoleService(SharpClawDbContext db)
             callerPs?.ExternalInfoStorePermissions, a => a.ExternalInformationStoreId);
         ValidateCollection("AudioDeviceAccesses", request.AudioDeviceAccesses,
             callerPs?.AudioDeviceAccesses, a => a.AudioDeviceId);
+        ValidateCollection("DisplayDeviceAccesses", request.DisplayDeviceAccesses,
+            callerPs?.DisplayDeviceAccesses, a => a.DisplayDeviceId);
+        ValidateCollection("EditorSessionAccesses", request.EditorSessionAccesses,
+            callerPs?.EditorSessionAccesses, a => a.EditorSessionId);
         ValidateCollection("AgentAccesses", request.AgentAccesses,
             callerPs?.AgentPermissions, a => a.AgentId);
         ValidateCollection("TaskAccesses", request.TaskAccesses,
@@ -322,6 +360,8 @@ public sealed class RoleService(SharpClawDbContext db)
             .Include(p => p.LocalInfoStorePermissions)
             .Include(p => p.ExternalInfoStorePermissions)
             .Include(p => p.AudioDeviceAccesses)
+            .Include(p => p.DisplayDeviceAccesses)
+            .Include(p => p.EditorSessionAccesses)
             .Include(p => p.AgentPermissions)
             .Include(p => p.TaskPermissions)
             .Include(p => p.SkillPermissions)
@@ -335,12 +375,19 @@ public sealed class RoleService(SharpClawDbContext db)
             RoleName: role.Name,
             DefaultClearance: ps?.DefaultClearance ?? PermissionClearance.Unset,
             CanCreateSubAgents: ps?.CanCreateSubAgents ?? false,
+            CreateSubAgentsClearance: ps?.CreateSubAgentsClearance ?? PermissionClearance.Unset,
             CanCreateContainers: ps?.CanCreateContainers ?? false,
+            CreateContainersClearance: ps?.CreateContainersClearance ?? PermissionClearance.Unset,
             CanRegisterInfoStores: ps?.CanRegisterInfoStores ?? false,
+            RegisterInfoStoresClearance: ps?.RegisterInfoStoresClearance ?? PermissionClearance.Unset,
             CanAccessLocalhostInBrowser: ps?.CanAccessLocalhostInBrowser ?? false,
+            AccessLocalhostInBrowserClearance: ps?.AccessLocalhostInBrowserClearance ?? PermissionClearance.Unset,
             CanAccessLocalhostCli: ps?.CanAccessLocalhostCli ?? false,
+            AccessLocalhostCliClearance: ps?.AccessLocalhostCliClearance ?? PermissionClearance.Unset,
             CanClickDesktop: ps?.CanClickDesktop ?? false,
+            ClickDesktopClearance: ps?.ClickDesktopClearance ?? PermissionClearance.Unset,
             CanTypeOnDesktop: ps?.CanTypeOnDesktop ?? false,
+            TypeOnDesktopClearance: ps?.TypeOnDesktopClearance ?? PermissionClearance.Unset,
             DangerousShellAccesses: MapGrants(ps?.DangerousShellAccesses, a => a.SystemUserId, a => a.Clearance),
             SafeShellAccesses: MapGrants(ps?.SafeShellAccesses, a => a.ContainerId, a => a.Clearance),
             ContainerAccesses: MapGrants(ps?.ContainerAccesses, a => a.ContainerId, a => a.Clearance),
@@ -349,6 +396,8 @@ public sealed class RoleService(SharpClawDbContext db)
             LocalInfoStoreAccesses: MapGrants(ps?.LocalInfoStorePermissions, a => a.LocalInformationStoreId, a => a.Clearance),
             ExternalInfoStoreAccesses: MapGrants(ps?.ExternalInfoStorePermissions, a => a.ExternalInformationStoreId, a => a.Clearance),
             AudioDeviceAccesses: MapGrants(ps?.AudioDeviceAccesses, a => a.AudioDeviceId, a => a.Clearance),
+            DisplayDeviceAccesses: MapGrants(ps?.DisplayDeviceAccesses, a => a.DisplayDeviceId, a => a.Clearance),
+            EditorSessionAccesses: MapGrants(ps?.EditorSessionAccesses, a => a.EditorSessionId, a => a.Clearance),
             AgentAccesses: MapGrants(ps?.AgentPermissions, a => a.AgentId, a => a.Clearance),
             TaskAccesses: MapGrants(ps?.TaskPermissions, a => a.ScheduledTaskId, a => a.Clearance),
             SkillAccesses: MapGrants(ps?.SkillPermissions, a => a.SkillId, a => a.Clearance));

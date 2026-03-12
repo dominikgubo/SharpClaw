@@ -5,6 +5,11 @@ namespace SharpClaw.Contracts.DTOs.Roles;
 // ── Requests ──────────────────────────────────────────────────────
 
 /// <summary>
+/// Creates a new role with an empty permission set.
+/// </summary>
+public sealed record CreateRoleRequest(string Name);
+
+/// <summary>
 /// Replaces the entire permission set of a role. The calling user must
 /// hold every permission they are granting — you cannot give what you
 /// don't have.
@@ -14,12 +19,19 @@ public sealed record SetRolePermissionsRequest(
 
     // Global flags
     bool CanCreateSubAgents = false,
+    PermissionClearance CreateSubAgentsClearance = PermissionClearance.Unset,
     bool CanCreateContainers = false,
+    PermissionClearance CreateContainersClearance = PermissionClearance.Unset,
     bool CanRegisterInfoStores = false,
+    PermissionClearance RegisterInfoStoresClearance = PermissionClearance.Unset,
     bool CanAccessLocalhostInBrowser = false,
+    PermissionClearance AccessLocalhostInBrowserClearance = PermissionClearance.Unset,
     bool CanAccessLocalhostCli = false,
+    PermissionClearance AccessLocalhostCliClearance = PermissionClearance.Unset,
     bool CanClickDesktop = false,
+    PermissionClearance ClickDesktopClearance = PermissionClearance.Unset,
     bool CanTypeOnDesktop = false,
+    PermissionClearance TypeOnDesktopClearance = PermissionClearance.Unset,
 
     // Per-resource grants
     IReadOnlyList<ResourceGrant>? DangerousShellAccesses = null,
@@ -30,6 +42,8 @@ public sealed record SetRolePermissionsRequest(
     IReadOnlyList<ResourceGrant>? LocalInfoStoreAccesses = null,
     IReadOnlyList<ResourceGrant>? ExternalInfoStoreAccesses = null,
     IReadOnlyList<ResourceGrant>? AudioDeviceAccesses = null,
+    IReadOnlyList<ResourceGrant>? DisplayDeviceAccesses = null,
+    IReadOnlyList<ResourceGrant>? EditorSessionAccesses = null,
     IReadOnlyList<ResourceGrant>? AgentAccesses = null,
     IReadOnlyList<ResourceGrant>? TaskAccesses = null,
     IReadOnlyList<ResourceGrant>? SkillAccesses = null);
@@ -56,12 +70,19 @@ public sealed record RolePermissionsResponse(
     PermissionClearance DefaultClearance,
 
     bool CanCreateSubAgents,
+    PermissionClearance CreateSubAgentsClearance,
     bool CanCreateContainers,
+    PermissionClearance CreateContainersClearance,
     bool CanRegisterInfoStores,
+    PermissionClearance RegisterInfoStoresClearance,
     bool CanAccessLocalhostInBrowser,
+    PermissionClearance AccessLocalhostInBrowserClearance,
     bool CanAccessLocalhostCli,
+    PermissionClearance AccessLocalhostCliClearance,
     bool CanClickDesktop,
+    PermissionClearance ClickDesktopClearance,
     bool CanTypeOnDesktop,
+    PermissionClearance TypeOnDesktopClearance,
 
     IReadOnlyList<ResourceGrant> DangerousShellAccesses,
     IReadOnlyList<ResourceGrant> SafeShellAccesses,
@@ -71,6 +92,8 @@ public sealed record RolePermissionsResponse(
     IReadOnlyList<ResourceGrant> LocalInfoStoreAccesses,
     IReadOnlyList<ResourceGrant> ExternalInfoStoreAccesses,
     IReadOnlyList<ResourceGrant> AudioDeviceAccesses,
+    IReadOnlyList<ResourceGrant> DisplayDeviceAccesses,
+    IReadOnlyList<ResourceGrant> EditorSessionAccesses,
     IReadOnlyList<ResourceGrant> AgentAccesses,
     IReadOnlyList<ResourceGrant> TaskAccesses,
     IReadOnlyList<ResourceGrant> SkillAccesses);

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
@@ -97,22 +98,31 @@ public sealed partial class ChatService(
         using var httpClient = httpClientFactory.CreateClient();
 
         var modelCapabilities = model.Capabilities;
+        var maxTokens = agent.MaxCompletionTokens;
 
         var loopResult = useNativeTools
             ? await RunNativeToolLoopAsync(
                 client, httpClient, apiKey, model.Name, systemPrompt,
-                history, agent.Id, channelId, modelCapabilities, approvalCallback, ct)
+                history, agent.Id, channelId, modelCapabilities, maxTokens, approvalCallback, ct)
             : await RunTextToolLoopAsync(
                 client, httpClient, apiKey, model.Name, systemPrompt,
-                history, agent.Id, channelId, modelCapabilities, approvalCallback, ct);
+                history, agent.Id, channelId, modelCapabilities, maxTokens, approvalCallback, ct);
 
         // Persist both messages
+        var senderUserId = jobService.GetSessionUserId();
+        var senderUsername = senderUserId.HasValue
+            ? (await db.Users.Where(u => u.Id == senderUserId.Value).Select(u => u.Username).FirstOrDefaultAsync(ct))
+            : null;
+
         var userMessage = new ChatMessageDB
         {
             Role = "user",
             Content = request.Message,
             ChannelId = channelId,
-            ThreadId = threadId
+            ThreadId = threadId,
+            SenderUserId = senderUserId,
+            SenderUsername = senderUsername,
+            ClientType = request.ClientType
         };
 
         var assistantMessage = new ChatMessageDB
@@ -120,7 +130,10 @@ public sealed partial class ChatService(
             Role = "assistant",
             Content = loopResult.AssistantContent,
             ChannelId = channelId,
-            ThreadId = threadId
+            ThreadId = threadId,
+            SenderAgentId = agent.Id,
+            SenderAgentName = agent.Name,
+            ClientType = request.ClientType
         };
 
         db.ChatMessages.Add(userMessage);
@@ -128,8 +141,8 @@ public sealed partial class ChatService(
         await db.SaveChangesAsync(ct);
 
         return new ChatResponse(
-            new ChatMessageResponse(userMessage.Role, userMessage.Content, userMessage.CreatedAt),
-            new ChatMessageResponse(assistantMessage.Role, assistantMessage.Content, assistantMessage.CreatedAt),
+            ToMessageResponse(userMessage),
+            ToMessageResponse(assistantMessage),
             loopResult.JobResults.Count > 0 ? loopResult.JobResults : null);
 
         } // try
@@ -151,9 +164,19 @@ public sealed partial class ChatService(
             .OrderByDescending(m => m.CreatedAt)
             .Take(limit)
             .OrderBy(m => m.CreatedAt)
-            .Select(m => new ChatMessageResponse(m.Role, m.Content, m.CreatedAt))
+            .Select(m => new ChatMessageResponse(
+                m.Role, m.Content, m.CreatedAt,
+                m.SenderUserId, m.SenderUsername,
+                m.SenderAgentId, m.SenderAgentName,
+                m.ClientType != null ? m.ClientType.ToString() : null))
             .ToListAsync(ct);
     }
+
+    private static ChatMessageResponse ToMessageResponse(ChatMessageDB m) =>
+        new(m.Role, m.Content, m.CreatedAt,
+            m.SenderUserId, m.SenderUsername,
+            m.SenderAgentId, m.SenderAgentName,
+            m.ClientType?.ToString());
 
     // ═══════════════════════════════════════════════════════════════
     // Agent resolution
@@ -343,6 +366,13 @@ public sealed partial class ChatService(
                 if (agentGrants.Count > 0)
                     sb.Append(" (").Append(string.Join(", ", agentGrants)).Append(')');
             }
+        }
+        else
+        {
+            // Agent has no role — emit a minimal self-awareness line so the
+            // model knows it has no permissions and must rely on user-supplied
+            // resource IDs from the conversation.
+            sb.Append(" | agent-role: (none) clearance=Unset");
         }
 
         if (editorContext is not null)
@@ -576,6 +606,7 @@ public sealed partial class ChatService(
         using var httpClient = httpClientFactory.CreateClient();
 
         var supportsVision = model.Capabilities.HasFlag(ModelCapability.Vision);
+        var maxTokens = agent.MaxCompletionTokens;
 
         // Convert history to tool-aware messages
         var messages = new List<ToolAwareMessage>(history.Count);
@@ -592,7 +623,7 @@ public sealed partial class ChatService(
             ChatCompletionResult? roundResult = null;
 
             await foreach (var chunk in client.StreamChatCompletionWithToolsAsync(
-                httpClient, apiKey, model.Name, systemPrompt, messages, AllTools, ct))
+                httpClient, apiKey, model.Name, systemPrompt, messages, AllTools, maxTokens, ct))
             {
                 if (chunk.Delta is not null)
                     yield return ChatStreamEvent.TextDelta(chunk.Delta);
@@ -676,12 +707,20 @@ public sealed partial class ChatService(
         // Persist both messages
         var assistantContent = fullContent.ToString();
 
+        var senderUserId = jobService.GetSessionUserId();
+        var senderUsername = senderUserId.HasValue
+            ? (await db.Users.Where(u => u.Id == senderUserId.Value).Select(u => u.Username).FirstOrDefaultAsync(ct))
+            : null;
+
         var userMessage = new ChatMessageDB
         {
             Role = "user",
             Content = request.Message,
             ChannelId = channelId,
-            ThreadId = threadId
+            ThreadId = threadId,
+            SenderUserId = senderUserId,
+            SenderUsername = senderUsername,
+            ClientType = request.ClientType
         };
 
         var assistantMessage = new ChatMessageDB
@@ -689,7 +728,10 @@ public sealed partial class ChatService(
             Role = "assistant",
             Content = assistantContent,
             ChannelId = channelId,
-            ThreadId = threadId
+            ThreadId = threadId,
+            SenderAgentId = agent.Id,
+            SenderAgentName = agent.Name,
+            ClientType = request.ClientType
         };
 
         db.ChatMessages.Add(userMessage);
@@ -697,8 +739,8 @@ public sealed partial class ChatService(
         await db.SaveChangesAsync(ct);
 
         yield return ChatStreamEvent.Complete(new ChatResponse(
-            new ChatMessageResponse(userMessage.Role, userMessage.Content, userMessage.CreatedAt),
-            new ChatMessageResponse(assistantMessage.Role, assistantMessage.Content, assistantMessage.CreatedAt),
+            ToMessageResponse(userMessage),
+            ToMessageResponse(assistantMessage),
             jobResults.Count > 0 ? jobResults : null));
 
         } // try
@@ -792,6 +834,7 @@ public sealed partial class ChatService(
         Guid agentId,
         Guid channelId,
         ModelCapability modelCapabilities,
+        int? maxCompletionTokens,
         Func<AgentJobResponse, CancellationToken, Task<bool>>? approvalCallback,
         CancellationToken ct)
     {
@@ -806,7 +849,7 @@ public sealed partial class ChatService(
         while (true)
         {
             var result = await client.ChatCompletionWithToolsAsync(
-                httpClient, apiKey, modelName, systemPrompt, messages, AllTools, ct);
+                httpClient, apiKey, modelName, systemPrompt, messages, AllTools, maxCompletionTokens, ct);
 
             if (!result.HasToolCalls || ++rounds > MaxToolCallRounds)
                 return new ToolLoopResult(result.Content ?? "", jobResults);
@@ -861,7 +904,7 @@ public sealed partial class ChatService(
             if (anyUnresolvableApproval)
             {
                 var finalResult = await client.ChatCompletionWithToolsAsync(
-                    httpClient, apiKey, modelName, systemPrompt, messages, AllTools, ct);
+                    httpClient, apiKey, modelName, systemPrompt, messages, AllTools, maxCompletionTokens, ct);
                 return new ToolLoopResult(finalResult.Content ?? "", jobResults);
             }
         }
@@ -882,6 +925,7 @@ public sealed partial class ChatService(
         Guid agentId,
         Guid channelId,
         ModelCapability modelCapabilities,
+        int? maxCompletionTokens,
         Func<AgentJobResponse, CancellationToken, Task<bool>>? approvalCallback,
         CancellationToken ct)
     {
@@ -893,7 +937,7 @@ public sealed partial class ChatService(
         while (true)
         {
             assistantContent = await client.ChatCompletionAsync(
-                httpClient, apiKey, modelName, systemPrompt, history, ct);
+                httpClient, apiKey, modelName, systemPrompt, history, maxCompletionTokens, ct);
 
             var toolCalls = ParseToolCalls(assistantContent);
             if (toolCalls.Count == 0 || ++rounds > MaxToolCallRounds)
@@ -951,7 +995,7 @@ public sealed partial class ChatService(
             if (anyUnresolvableApproval)
             {
                 assistantContent = await client.ChatCompletionAsync(
-                    httpClient, apiKey, modelName, systemPrompt, history, ct);
+                    httpClient, apiKey, modelName, systemPrompt, history, maxCompletionTokens, ct);
                 break;
             }
         }
@@ -972,12 +1016,20 @@ public sealed partial class ChatService(
 
         try
         {
+            Debug.WriteLine(
+                $"[ParseToolCall] {toolCall.Name} (id={toolCall.Id}) args: {toolCall.ArgumentsJson}",
+                "SharpClaw.CLI");
+
             var payload = JsonSerializer.Deserialize<ToolCallPayload>(toolCall.ArgumentsJson, JsonOptions);
             if (payload is null) return null;
 
             Guid? resourceId = Guid.TryParse(payload.ResourceId, out var rid) ? rid : null;
             // TargetId is the generic "resourceId" alias for non-shell tools
             resourceId ??= Guid.TryParse(payload.TargetId, out var tid) ? tid : null;
+
+            Debug.WriteLine(
+                $"[ParseToolCall] {toolCall.Name} → resourceId={resourceId}, targetId={payload.TargetId}",
+                "SharpClaw.CLI");
 
             Guid? transcriptionModelId = Guid.TryParse(payload.TranscriptionModelId, out var tmid) ? tmid : null;
 
@@ -1098,7 +1150,7 @@ public sealed partial class ChatService(
         if (imageBase64 is not null && supportsVision)
         {
             return ToolAwareMessage.ToolResultWithImage(
-                toolCallId, resultContent, imageBase64, "image/png");
+                toolCallId, resultContent, imageBase64, "image/jpeg");
         }
 
         // Non-vision model: append a note that the screenshot was captured

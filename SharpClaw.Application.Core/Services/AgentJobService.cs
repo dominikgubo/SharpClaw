@@ -124,6 +124,9 @@ IConfiguration configuration)
             WorkingDirectory = request.WorkingDirectory,
             TranscriptionModelId = effectiveTranscriptionModelId,
             Language = request.Language,
+            TranscriptionMode = request.TranscriptionMode,
+            WindowSeconds = request.WindowSeconds,
+            StepSeconds = request.StepSeconds,
         };
 
         db.AgentJobs.Add(job);
@@ -239,9 +242,11 @@ IConfiguration configuration)
             return ToResponse(job);
         }
 
-        if (IsTranscriptionAction(job.ActionType))
+        if (IsTranscriptionAction(job.ActionType)
+            && job.Status is AgentJobStatus.Executing or AgentJobStatus.Paused)
         {
-            orchestrator.Stop(jobId);
+            if (job.Status == AgentJobStatus.Executing)
+                orchestrator.Stop(jobId);
             CompleteChannel(jobId);
         }
 
@@ -267,14 +272,15 @@ IConfiguration configuration)
             return ToResponse(job);
         }
 
-        if (job.Status != AgentJobStatus.Executing)
+        if (job.Status is not AgentJobStatus.Executing and not AgentJobStatus.Paused)
         {
-            AddLog(job, $"Stop rejected: job is {job.Status}, not Executing.", "Warning");
+            AddLog(job, $"Stop rejected: job is {job.Status}, not Executing or Paused.", "Warning");
             await db.SaveChangesAsync(ct);
             return ToResponse(job);
         }
 
-        orchestrator.Stop(jobId);
+        if (job.Status == AgentJobStatus.Executing)
+            orchestrator.Stop(jobId);
 
         job.Status = AgentJobStatus.Completed;
         job.CompletedAt = DateTimeOffset.UtcNow;
@@ -282,6 +288,63 @@ IConfiguration configuration)
         await db.SaveChangesAsync(ct);
 
         CompleteChannel(jobId);
+
+        return ToResponse(job);
+    }
+
+    /// <summary>
+    /// Pause a long-running job.  For transcription jobs this stops the
+    /// audio capture loop so no further inference calls (and therefore no
+    /// token costs) are incurred.  The job can be resumed later with
+    /// <see cref="ResumeAsync"/>.
+    /// </summary>
+    public async Task<AgentJobResponse?> PauseAsync(
+        Guid jobId, CancellationToken ct = default)
+    {
+        var job = await LoadJobAsync(jobId, ct);
+        if (job is null) return null;
+
+        if (job.Status != AgentJobStatus.Executing)
+        {
+            AddLog(job, $"Pause rejected: job is {job.Status}, not Executing.", "Warning");
+            await db.SaveChangesAsync(ct);
+            return ToResponse(job);
+        }
+
+        if (IsTranscriptionAction(job.ActionType))
+            orchestrator.Stop(jobId);
+
+        job.Status = AgentJobStatus.Paused;
+        AddLog(job, "Job paused.");
+        await db.SaveChangesAsync(ct);
+
+        return ToResponse(job);
+    }
+
+    /// <summary>
+    /// Resume a previously paused job.  For transcription jobs this
+    /// restarts the audio capture and inference loop using the original
+    /// job parameters.
+    /// </summary>
+    public async Task<AgentJobResponse?> ResumeAsync(
+        Guid jobId, CancellationToken ct = default)
+    {
+        var job = await LoadJobAsync(jobId, ct);
+        if (job is null) return null;
+
+        if (job.Status != AgentJobStatus.Paused)
+        {
+            AddLog(job, $"Resume rejected: job is {job.Status}, not Paused.", "Warning");
+            await db.SaveChangesAsync(ct);
+            return ToResponse(job);
+        }
+
+        job.Status = AgentJobStatus.Executing;
+        AddLog(job, "Job resumed.");
+        await db.SaveChangesAsync(ct);
+
+        if (IsTranscriptionAction(job.ActionType))
+            await RestartTranscriptionAsync(job, ct);
 
         return ToResponse(job);
     }
@@ -306,6 +369,24 @@ IConfiguration configuration)
             .ToListAsync(ct);
 
         return jobs.Select(ToResponse).ToList();
+    }
+
+    /// <summary>
+    /// List lightweight summaries for all jobs in a channel, most recent first.
+    /// Does not load <c>ResultData</c>, <c>ErrorLog</c>, logs, or segments —
+    /// suitable for populating dropdowns or list views without memory pressure.
+    /// </summary>
+    public async Task<IReadOnlyList<AgentJobSummaryResponse>> ListSummariesAsync(
+        Guid channelId, CancellationToken ct = default)
+    {
+        return await db.AgentJobs
+            .Where(j => j.ChannelId == channelId)
+            .OrderByDescending(j => j.CreatedAt)
+            .Select(j => new AgentJobSummaryResponse(
+                j.Id, j.ChannelId, j.AgentId,
+                j.ActionType, j.ResourceId, j.Status,
+                j.CreatedAt, j.StartedAt, j.CompletedAt))
+            .ToListAsync(ct);
     }
 
     /// <summary>List transcription jobs, optionally filtered by audio device.</summary>
@@ -349,7 +430,8 @@ IConfiguration configuration)
     /// </summary>
     public async Task<TranscriptionSegmentResponse?> PushSegmentAsync(
         Guid jobId, string text, double startTime, double endTime,
-        double? confidence = null, CancellationToken ct = default)
+        double? confidence = null, bool isProvisional = false,
+        CancellationToken ct = default)
     {
         var job = await db.AgentJobs.FirstOrDefaultAsync(j => j.Id == jobId, ct);
         if (job is null || job.Status != AgentJobStatus.Executing)
@@ -362,7 +444,8 @@ IConfiguration configuration)
             StartTime = startTime,
             EndTime = endTime,
             Confidence = confidence,
-            Timestamp = DateTimeOffset.UtcNow
+            Timestamp = DateTimeOffset.UtcNow,
+            IsProvisional = isProvisional,
         };
 
         db.TranscriptionSegments.Add(segment);
@@ -370,12 +453,101 @@ IConfiguration configuration)
 
         var response = new TranscriptionSegmentResponse(
             segment.Id, segment.Text, segment.StartTime, segment.EndTime,
-            segment.Confidence, segment.Timestamp);
+            segment.Confidence, segment.Timestamp, segment.IsProvisional);
 
         if (_channels.TryGetValue(jobId, out var channel))
             await channel.Writer.WriteAsync(response, ct);
 
         return response;
+    }
+
+    /// <summary>
+    /// Promotes a provisional segment to final, optionally updating its
+    /// text and confidence.  Pushes the updated segment to streaming
+    /// consumers so they can replace the provisional version in-place.
+    /// </summary>
+    public async Task<TranscriptionSegmentResponse?> FinalizeSegmentAsync(
+        Guid jobId, Guid segmentId, string text, double? confidence = null,
+        CancellationToken ct = default)
+    {
+        var segment = await db.TranscriptionSegments
+            .FirstOrDefaultAsync(s => s.Id == segmentId && s.AgentJobId == jobId, ct);
+        if (segment is null)
+            return null;
+
+        segment.Text = text;
+        segment.IsProvisional = false;
+        segment.Timestamp = DateTimeOffset.UtcNow;
+        if (confidence.HasValue)
+            segment.Confidence = confidence;
+
+        await db.SaveChangesAsync(ct);
+
+        var response = new TranscriptionSegmentResponse(
+            segment.Id, segment.Text, segment.StartTime, segment.EndTime,
+            segment.Confidence, segment.Timestamp, IsProvisional: false);
+
+        if (_channels.TryGetValue(jobId, out var channel))
+            await channel.Writer.WriteAsync(response, ct);
+
+        return response;
+    }
+
+    /// <summary>
+    /// Updates the text of a provisional segment without finalizing it.
+    /// Used to merge sentence-completion fragments into their parent
+    /// provisional instead of emitting a standalone segment.
+    /// </summary>
+    public async Task<bool> UpdateProvisionalTextAsync(
+        Guid jobId, Guid segmentId, string text,
+        CancellationToken ct = default)
+    {
+        var segment = await db.TranscriptionSegments
+            .FirstOrDefaultAsync(s => s.Id == segmentId && s.AgentJobId == jobId && s.IsProvisional, ct);
+        if (segment is null)
+            return false;
+
+        segment.Text = text;
+        segment.Timestamp = DateTimeOffset.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (_channels.TryGetValue(jobId, out var channel))
+        {
+            var response = new TranscriptionSegmentResponse(
+                segment.Id, segment.Text, segment.StartTime, segment.EndTime,
+                segment.Confidence, segment.Timestamp, IsProvisional: true);
+            await channel.Writer.WriteAsync(response, ct);
+        }
+
+        return true;
+    }
+
+    /// <summary>
+    /// Removes a provisional segment that was not confirmed by later
+    /// inference ticks (likely a hallucination).  Deletes the DB record
+    /// and pushes a zero-length "retracted" event so streaming consumers
+    /// can remove it.
+    /// </summary>
+    public async Task RetractSegmentAsync(
+        Guid jobId, Guid segmentId, CancellationToken ct = default)
+    {
+        var segment = await db.TranscriptionSegments
+            .FirstOrDefaultAsync(s => s.Id == segmentId && s.AgentJobId == jobId, ct);
+        if (segment is null)
+            return;
+
+        db.TranscriptionSegments.Remove(segment);
+        await db.SaveChangesAsync(ct);
+
+        // Push a tombstone so streaming consumers know to remove it.
+        if (_channels.TryGetValue(jobId, out var channel))
+        {
+            var tombstone = new TranscriptionSegmentResponse(
+                segment.Id, string.Empty, segment.StartTime, segment.EndTime,
+                Confidence: null, Timestamp: DateTimeOffset.UtcNow,
+                IsProvisional: false);
+            await channel.Writer.WriteAsync(tombstone, ct);
+        }
     }
 
     /// <summary>
@@ -485,7 +657,28 @@ IConfiguration configuration)
         AddLog(job, $"Transcription started with model '{model.Name}' on device '{device.Name}'.");
         await db.SaveChangesAsync(ct);
 
-        orchestrator.Start(job.Id, model.Id, device.DeviceIdentifier, job.Language);
+        orchestrator.Start(
+            job.Id, model.Id, device.DeviceIdentifier, job.Language,
+            job.TranscriptionMode, job.WindowSeconds, job.StepSeconds);
+    }
+
+    /// <summary>
+    /// Restarts the transcription capture loop for a resumed job using
+    /// the parameters already persisted on the <see cref="AgentJobDB"/>.
+    /// </summary>
+    private async Task RestartTranscriptionAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var modelId = job.TranscriptionModelId
+            ?? throw new InvalidOperationException("Paused transcription job has no model.");
+
+        var device = await db.AudioDevices.FirstOrDefaultAsync(d => d.Id == job.ResourceId, ct)
+            ?? throw new InvalidOperationException("Audio device not found.");
+
+        _channels.TryAdd(job.Id, Channel.CreateUnbounded<TranscriptionSegmentResponse>());
+
+        orchestrator.Start(
+            job.Id, modelId, device.DeviceIdentifier, job.Language,
+            job.TranscriptionMode, job.WindowSeconds, job.StepSeconds);
     }
 
     // ── Shell execution routing ─────────────────────────────────
@@ -1291,11 +1484,11 @@ IConfiguration configuration)
         AddLog(job, $"Capturing display: {device.Name} (index {device.DisplayIndex})");
         await db.SaveChangesAsync(ct);
 
-        byte[] pngBytes;
+        byte[] imageBytes;
 
         if (OperatingSystem.IsWindows())
         {
-            pngBytes = CaptureWindowsDisplay(device.DisplayIndex);
+            imageBytes = CaptureWindowsDisplay(device.DisplayIndex);
         }
         else
         {
@@ -1303,21 +1496,18 @@ IConfiguration configuration)
                 "Display capture is currently only supported on Windows.");
         }
 
-        return $"Screenshot captured ({pngBytes.Length} bytes) of display '{device.Name}'\n[SCREENSHOT_BASE64]{Convert.ToBase64String(pngBytes)}";
+        return $"Screenshot captured ({imageBytes.Length} bytes) of display '{device.Name}'\n[SCREENSHOT_BASE64]{Convert.ToBase64String(imageBytes)}";
     }
 
     /// <summary>
     /// Captures a single monitor on Windows using GDI+ via
     /// <c>System.Drawing</c> interop (available on .NET 10 Windows).
+    /// The image is downscaled to a max dimension of 1280px and
+    /// encoded as JPEG to keep the base64 payload under API limits.
     /// </summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static byte[] CaptureWindowsDisplay(int displayIndex)
     {
-        // Screen bounds via the virtual-screen approach; when a specific
-        // display is requested we shell out to a tiny PowerShell snippet
-        // that uses System.Windows.Forms.Screen because .NET 10 doesn't
-        // ship System.Windows.Forms by default in non-WinForms apps.
-        // Alternatively, we use the simple P/Invoke approach.
         var bounds = GetDisplayBounds(displayIndex);
 
         using var bitmap = new System.Drawing.Bitmap(bounds.Width, bounds.Height);
@@ -1326,9 +1516,40 @@ IConfiguration configuration)
             g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
         }
 
-        using var ms = new System.IO.MemoryStream();
-        bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
-        return ms.ToArray();
+        // Downscale to max 1280px on the longest side to reduce payload.
+        const int maxDimension = 1280;
+        var scale = Math.Min(1.0, (double)maxDimension / Math.Max(bounds.Width, bounds.Height));
+
+        System.Drawing.Bitmap toEncode;
+        if (scale < 1.0)
+        {
+            var newW = (int)(bounds.Width * scale);
+            var newH = (int)(bounds.Height * scale);
+            toEncode = new System.Drawing.Bitmap(bitmap, newW, newH);
+        }
+        else
+        {
+            toEncode = bitmap;
+        }
+
+        try
+        {
+            using var ms = new System.IO.MemoryStream();
+            var jpegEncoder = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
+                .First(e => e.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
+            var encoderParams = new System.Drawing.Imaging.EncoderParameters(1)
+            {
+                Param = [new System.Drawing.Imaging.EncoderParameter(
+                    System.Drawing.Imaging.Encoder.Quality, 80L)]
+            };
+            toEncode.Save(ms, jpegEncoder, encoderParams);
+            return ms.ToArray();
+        }
+        finally
+        {
+            if (!ReferenceEquals(toEncode, bitmap))
+                toEncode.Dispose();
+        }
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -1440,8 +1661,8 @@ IConfiguration configuration)
         PerformClick(absX, absY, button, clickType);
 
         // Capture a follow-up screenshot so the model can see the result
-        var pngBytes = CaptureWindowsDisplay(device.DisplayIndex);
-        return $"Clicked {button} ({clickType}) at ({payload.X},{payload.Y}) on '{device.Name}'\n[SCREENSHOT_BASE64]{Convert.ToBase64String(pngBytes)}";
+        var imageBytes = CaptureWindowsDisplay(device.DisplayIndex);
+        return $"Clicked {button} ({clickType}) at ({payload.X},{payload.Y}) on '{device.Name}'\n[SCREENSHOT_BASE64]{Convert.ToBase64String(imageBytes)}";
     }
 
     /// <summary>
@@ -1488,8 +1709,8 @@ IConfiguration configuration)
 
         // Brief pause for UI to settle, then screenshot
         await Task.Delay(200, ct);
-        var pngBytes = CaptureWindowsDisplay(device.DisplayIndex);
-        return $"Typed {payload.Text.Length} characters on '{device.Name}'\n[SCREENSHOT_BASE64]{Convert.ToBase64String(pngBytes)}";
+        var imageBytes = CaptureWindowsDisplay(device.DisplayIndex);
+        return $"Typed {payload.Text.Length} characters on '{device.Name}'\n[SCREENSHOT_BASE64]{Convert.ToBase64String(imageBytes)}";
     }
 
     // ── Win32 SendInput helpers ───────────────────────────────────
@@ -2185,11 +2406,15 @@ IConfiguration configuration)
             WorkingDirectory: job.WorkingDirectory,
             TranscriptionModelId: job.TranscriptionModelId,
             Language: job.Language,
+            TranscriptionMode: job.TranscriptionMode,
+            WindowSeconds: job.WindowSeconds,
+            StepSeconds: job.StepSeconds,
             Segments: IsTranscriptionAction(job.ActionType)
                 ? job.TranscriptionSegments
                     .OrderBy(s => s.StartTime)
                     .Select(s => new TranscriptionSegmentResponse(
-                        s.Id, s.Text, s.StartTime, s.EndTime, s.Confidence, s.Timestamp))
+                        s.Id, s.Text, s.StartTime, s.EndTime, s.Confidence, s.Timestamp,
+                        s.IsProvisional))
                     .ToList()
                 : null);
 }

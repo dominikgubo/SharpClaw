@@ -23,6 +23,8 @@ public sealed partial class FirstSetupPage : Page
     private TaskCompletionSource<bool>? _providerTcs;
     private TaskCompletionSource<bool>? _apiKeyTcs;
     private TaskCompletionSource<Guid?>? _agentTcs;
+    private TaskCompletionSource<bool>? _localModelTcs;
+    private TaskCompletionSource<bool>? _roleTcs;
     private bool _localOnly;
     private List<ProviderDto>? _providers;
 
@@ -168,36 +170,51 @@ public sealed partial class FirstSetupPage : Page
         {
             if (_localOnly)
             {
-                ReplaceLastStep("No models available (local only). Setup cannot continue.", error: true);
-                return;
-            }
+                // Guide the user through downloading a local model from HuggingFace.
+                ReplaceLastStep("No models found. Download a local model to continue.");
+                LocalModelDownloadPanel.Visibility = Visibility.Visible;
+                _localModelTcs = new TaskCompletionSource<bool>();
+                var downloaded = await _localModelTcs.Task;
+                LocalModelDownloadPanel.Visibility = Visibility.Collapsed;
 
-            ReplaceLastStep("No models found. Syncing from providers...");
-            var synced = false;
-            foreach (var p in _providers!.Where(p => p.HasApiKey))
-            {
-                try
+                if (!downloaded)
                 {
-                    var resp = await Api.PostAsync($"/providers/{p.Id}/sync-models", null);
-                    if (resp.IsSuccessStatusCode) synced = true;
+                    ReplaceLastStep("No local model downloaded. Setup cannot continue.", error: true);
+                    return;
                 }
-                catch { /* try next */ }
-            }
 
-            if (!synced)
+                models = await FetchListAsync<ModelDto>("/models");
+                ReplaceLastStep($"Downloaded and registered {models?.Count ?? 0} model(s).", done: true);
+            }
+            else
             {
-                ReplaceLastStep("Model sync failed. Check your API key and try setup again.", error: true);
-                // Wipe API keys on failed sync
+                ReplaceLastStep("No models found. Syncing from providers...");
+                var synced = false;
                 foreach (var p in _providers!.Where(p => p.HasApiKey))
                 {
-                    try { await Api.PostAsync($"/providers/{p.Id}/set-key", new StringContent(JsonSerializer.Serialize(new { apiKey = "" }, Json), Encoding.UTF8, "application/json")); }
-                    catch { /* best effort */ }
+                    try
+                    {
+                        var resp = await Api.PostAsync($"/providers/{p.Id}/sync-models", null);
+                        if (resp.IsSuccessStatusCode) synced = true;
+                    }
+                    catch { /* try next */ }
                 }
-                return;
-            }
 
-            models = await FetchListAsync<ModelDto>("/models");
-            ReplaceLastStep($"Synced {models?.Count ?? 0} model(s).", done: true);
+                if (!synced)
+                {
+                    ReplaceLastStep("Model sync failed. Check your API key and try setup again.", error: true);
+                    // Wipe API keys on failed sync
+                    foreach (var p in _providers!.Where(p => p.HasApiKey))
+                    {
+                        try { await Api.PostAsync($"/providers/{p.Id}/set-key", new StringContent(JsonSerializer.Serialize(new { apiKey = "" }, Json), Encoding.UTF8, "application/json")); }
+                        catch { /* best effort */ }
+                    }
+                    return;
+                }
+
+                models = await FetchListAsync<ModelDto>("/models");
+                ReplaceLastStep($"Synced {models?.Count ?? 0} model(s).", done: true);
+            }
         }
 
         // ── Step 4: Agents ──
@@ -235,6 +252,7 @@ public sealed partial class FirstSetupPage : Page
         AppendStep("Checking contexts and channels...");
         var contexts = await FetchListAsync<ContextDto>("/channel-contexts");
         var hasFullSetup = false;
+        Guid? selectedAgentId = null;
         if (contexts is { Count: > 0 })
         {
             // Check if any context has a channel with a thread
@@ -257,35 +275,37 @@ public sealed partial class FirstSetupPage : Page
 
         if (hasFullSetup)
         {
+            // Resolve the agent from the existing context so Step 6
+            // can still check/assign its role.
+            selectedAgentId = contexts!
+                .Select(c => c.Agent?.Id)
+                .FirstOrDefault(id => id.HasValue);
+
+            // If contexts don't carry AgentId (older API), try the agent list.
+            if (selectedAgentId is null)
+            {
+                agents ??= await FetchListAsync<AgentDto>("/agents") ?? [];
+                selectedAgentId = agents.FirstOrDefault()?.Id;
+            }
+
             ReplaceLastStep("Default context, channel, and thread exist.", done: true);
         }
         else
         {
             ReplaceLastStep("Creating default workspace...");
 
-            // Try to find GPT 5.4 agent (non-pro)
             agents ??= await FetchListAsync<AgentDto>("/agents") ?? [];
-            var gpt54 = agents.FirstOrDefault(a =>
-                a.ModelName.Contains("gpt-5.4", StringComparison.OrdinalIgnoreCase)
-                && !a.ModelName.Contains("pro", StringComparison.OrdinalIgnoreCase));
-
-            Guid? selectedAgentId = gpt54?.Id;
+            ReplaceLastStep("Please select a default agent for the initial workspace.");
+            PopulateAgentSelector(agents);
+            AgentSelectorPanel.Visibility = Visibility.Visible;
+            _agentTcs = new TaskCompletionSource<Guid?>();
+            selectedAgentId = await _agentTcs.Task;
+            AgentSelectorPanel.Visibility = Visibility.Collapsed;
 
             if (selectedAgentId is null)
             {
-                // User must select
-                ReplaceLastStep("GPT 5.4 not available. Please select a default agent.");
-                PopulateAgentSelector(agents);
-                AgentSelectorPanel.Visibility = Visibility.Visible;
-                _agentTcs = new TaskCompletionSource<Guid?>();
-                selectedAgentId = await _agentTcs.Task;
-                AgentSelectorPanel.Visibility = Visibility.Collapsed;
-
-                if (selectedAgentId is null)
-                {
-                    ReplaceLastStep("No agent selected. Setup cannot continue.", error: true);
-                    return;
-                }
+                ReplaceLastStep("No agent selected. Setup cannot continue.", error: true);
+                return;
             }
 
             try
@@ -327,6 +347,56 @@ public sealed partial class FirstSetupPage : Page
             {
                 ReplaceLastStep($"Failed: {ex.Message}", error: true);
                 return;
+            }
+        }
+
+        // ── Step 6: Role & permissions for the selected agent ──
+        if (selectedAgentId is not null)
+        {
+            AppendStep("Checking agent role...");
+            var needsRole = true;
+
+            try
+            {
+                var agentResp = await Api.GetAsync($"/agents/{selectedAgentId}");
+                if (agentResp.IsSuccessStatusCode)
+                {
+                    using var agDoc = JsonDocument.Parse(await agentResp.Content.ReadAsStringAsync());
+                    if (agDoc.RootElement.TryGetProperty("roleId", out var rp)
+                        && rp.ValueKind == JsonValueKind.String)
+                    {
+                        needsRole = false;
+                        ReplaceLastStep("Agent already has a role.", done: true);
+                    }
+                }
+            }
+            catch { /* continue to create role */ }
+
+            if (needsRole)
+            {
+                ReplaceLastStep("Agent has no role. Set up permissions so it can use tools.");
+                PopulateClearanceSelector();
+                RolePermissionsPanel.Visibility = Visibility.Visible;
+                _roleTcs = new TaskCompletionSource<bool>();
+                var roleCreated = await _roleTcs.Task;
+                RolePermissionsPanel.Visibility = Visibility.Collapsed;
+
+                if (roleCreated)
+                {
+                    try
+                    {
+                        await CreateRoleAndAssignAsync(selectedAgentId.Value);
+                        ReplaceLastStep("Role created and permissions applied.", done: true);
+                    }
+                    catch (Exception ex)
+                    {
+                        ReplaceLastStep($"Failed to create role: {ex.Message}", error: true);
+                    }
+                }
+                else
+                {
+                    ReplaceLastStep("Role setup skipped. Agent has no permissions.", done: true);
+                }
             }
         }
 
@@ -436,6 +506,96 @@ public sealed partial class FirstSetupPage : Page
         _apiKeyTcs?.TrySetResult(false);
     }
 
+    private async void OnListFilesClick(object sender, RoutedEventArgs e)
+    {
+        var url = HfUrlBox.Text?.Trim();
+        if (string.IsNullOrEmpty(url))
+        {
+            AppendStep("URL is required.", error: true);
+            return;
+        }
+
+        HfListFilesBtn.IsEnabled = false;
+        HfStatusBlock.Text = "Fetching available files...";
+        HfStatusBlock.Visibility = Visibility.Visible;
+
+        try
+        {
+            var encodedUrl = Uri.EscapeDataString(url);
+            var files = await FetchListAsync<GgufFileDto>($"/models/local/download/list?url={encodedUrl}");
+            if (files is not { Count: > 0 })
+            {
+                HfStatusBlock.Text = "No GGUF files found at this URL.";
+                HfListFilesBtn.IsEnabled = true;
+                return;
+            }
+
+            HfFileSelector.Items.Clear();
+            foreach (var f in files)
+            {
+                var label = f.Quantization is not null
+                    ? $"{f.Filename}  ({f.Quantization})"
+                    : f.Filename;
+                HfFileSelector.Items.Add(new ComboBoxItem
+                {
+                    Content = label,
+                    Tag = f.DownloadUrl,
+                });
+            }
+            HfFileSelector.SelectedIndex = 0;
+            HfFileSelectionPanel.Visibility = Visibility.Visible;
+            HfStatusBlock.Text = $"{files.Count} file(s) available.";
+        }
+        catch (Exception ex)
+        {
+            HfStatusBlock.Text = $"Failed: {ex.Message}";
+        }
+        finally
+        {
+            HfListFilesBtn.IsEnabled = true;
+        }
+    }
+
+    private async void OnDownloadModelClick(object sender, RoutedEventArgs e)
+    {
+        if (HfFileSelector.SelectedItem is not ComboBoxItem { Tag: string downloadUrl })
+        {
+            AppendStep("Please select a file.", error: true);
+            return;
+        }
+
+        HfDownloadBtn.IsEnabled = false;
+        HfListFilesBtn.IsEnabled = false;
+        HfStatusBlock.Text = "Downloading model — this may take a while...";
+        HfStatusBlock.Visibility = Visibility.Visible;
+
+        try
+        {
+            var body = JsonSerializer.Serialize(new { url = downloadUrl }, Json);
+            var resp = await Api.PostAsync("/models/local/download",
+                new StringContent(body, Encoding.UTF8, "application/json"));
+
+            if (resp.IsSuccessStatusCode)
+            {
+                HfStatusBlock.Text = "Download complete!";
+                _localModelTcs?.TrySetResult(true);
+            }
+            else
+            {
+                var msg = await resp.Content.ReadAsStringAsync();
+                HfStatusBlock.Text = $"Download failed: {(int)resp.StatusCode} — {msg}";
+                HfDownloadBtn.IsEnabled = true;
+                HfListFilesBtn.IsEnabled = true;
+            }
+        }
+        catch (Exception ex)
+        {
+            HfStatusBlock.Text = $"Download failed: {ex.Message}";
+            HfDownloadBtn.IsEnabled = true;
+            HfListFilesBtn.IsEnabled = true;
+        }
+    }
+
     private async void OnDeviceCodeStartClick(object sender, RoutedEventArgs e)
     {
         if (ApiKeyProviderSelector.SelectedItem is not ComboBoxItem { Tag: Guid providerId }) return;
@@ -516,12 +676,161 @@ public sealed partial class FirstSetupPage : Page
         _providerTcs?.TrySetResult(false);
         _apiKeyTcs?.TrySetResult(false);
         _agentTcs?.TrySetResult(null);
+        _localModelTcs?.TrySetResult(false);
+        _roleTcs?.TrySetResult(false);
 
         AppendStep("Setup skipped. You can configure everything manually.", done: true);
         await Task.Delay(800);
 
         var navigator = App.Services!.GetRequiredService<INavigator>();
         await navigator.NavigateRouteAsync(this, "Main", qualifier: Qualifiers.ClearBackStack);
+    }
+
+    private void OnRoleSubmitClick(object sender, RoutedEventArgs e)
+        => _roleTcs?.TrySetResult(true);
+
+    private void OnRoleSkipClick(object sender, RoutedEventArgs e)
+        => _roleTcs?.TrySetResult(false);
+
+    private void PopulateClearanceSelector()
+    {
+        ClearanceSelector.Items.Clear();
+        ClearanceSelector.Items.Add(new ComboBoxItem { Content = "Can act without approval", Tag = "Independent" });
+        ClearanceSelector.Items.Add(new ComboBoxItem { Content = "Only with approval from a user that can grant the permission", Tag = "ApprovedBySameLevelUser" });
+        ClearanceSelector.Items.Add(new ComboBoxItem { Content = "Only with approval from a user", Tag = "ApprovedByWhitelistedUser" });
+        ClearanceSelector.Items.Add(new ComboBoxItem { Content = "Only with approval from an agent that has clearance to act", Tag = "ApprovedByPermittedAgent" });
+        ClearanceSelector.Items.Add(new ComboBoxItem { Content = "Only with approval from a managing agent", Tag = "ApprovedByWhitelistedAgent" });
+        ClearanceSelector.SelectedIndex = 0; // Default to Independent for first-time setup
+
+        // Populate per-flag and per-resource clearance selectors
+        PopulateClearanceCombo(ClrLocalhostBrowser);
+        PopulateClearanceCombo(ClrLocalhostCli);
+        PopulateClearanceCombo(ClrClickDesktop);
+        PopulateClearanceCombo(ClrTypeOnDesktop);
+        PopulateClearanceCombo(ClrCreateSubAgents);
+        PopulateClearanceCombo(ClrCreateContainers);
+        PopulateClearanceCombo(ClrRegisterInfoStores);
+        PopulateClearanceCombo(ClrSafeShell);
+        PopulateClearanceCombo(ClrDangerousShell);
+        PopulateClearanceCombo(ClrContainerAccess);
+        PopulateClearanceCombo(ClrWebsiteAccess);
+        PopulateClearanceCombo(ClrSearchEngineAccess);
+        PopulateClearanceCombo(ClrLocalInfoStore);
+        PopulateClearanceCombo(ClrExternalInfoStore);
+        PopulateClearanceCombo(ClrAudioDevice);
+        PopulateClearanceCombo(ClrDisplayDevice);
+        PopulateClearanceCombo(ClrEditorSession);
+        PopulateClearanceCombo(ClrAgentManagement);
+        PopulateClearanceCombo(ClrTaskManagement);
+        PopulateClearanceCombo(ClrSkillManagement);
+    }
+
+    private static void PopulateClearanceCombo(ComboBox box)
+    {
+        box.Items.Clear();
+        box.Items.Add(new ComboBoxItem { Content = "Can act without approval", Tag = "Independent" });
+        box.Items.Add(new ComboBoxItem { Content = "Only with approval from a user that can grant the permission", Tag = "ApprovedBySameLevelUser" });
+        box.Items.Add(new ComboBoxItem { Content = "Only with approval from a user", Tag = "ApprovedByWhitelistedUser" });
+        box.Items.Add(new ComboBoxItem { Content = "Only with approval from an agent that has clearance to act", Tag = "ApprovedByPermittedAgent" });
+        box.Items.Add(new ComboBoxItem { Content = "Only with approval from a managing agent", Tag = "ApprovedByWhitelistedAgent" });
+        box.SelectedIndex = 0;
+    }
+
+    private static string GetClearanceTag(ComboBox box)
+        => box.SelectedItem is ComboBoxItem { Tag: string cl } ? cl : "Independent";
+
+    private async Task CreateRoleAndAssignAsync(Guid agentId)
+    {
+        // 1. Create a new role via POST /roles
+        var roleBody = JsonSerializer.Serialize(new { name = "Default Agent Role" }, Json);
+        var roleResp = await Api.PostAsync("/roles",
+            new StringContent(roleBody, Encoding.UTF8, "application/json"));
+
+        if (!roleResp.IsSuccessStatusCode)
+        {
+            var err = await roleResp.Content.ReadAsStringAsync();
+            throw new InvalidOperationException($"Failed to create role: {(int)roleResp.StatusCode} {err}");
+        }
+
+        Guid roleId;
+        using (var roleDoc = JsonDocument.Parse(await roleResp.Content.ReadAsStringAsync()))
+            roleId = roleDoc.RootElement.GetProperty("id").GetGuid();
+
+        // 2. Assign the role to the agent
+        var assignBody = JsonSerializer.Serialize(new { roleId }, Json);
+        var assignResp = await Api.PutAsync($"/agents/{agentId}/role",
+            new StringContent(assignBody, Encoding.UTF8, "application/json"));
+
+        if (!assignResp.IsSuccessStatusCode)
+        {
+            var err = await assignResp.Content.ReadAsStringAsync();
+            throw new InvalidOperationException($"Failed to assign role: {(int)assignResp.StatusCode} {err}");
+        }
+
+        // 3. Build the permission set from the UI checkboxes
+        var clearance = ClearanceSelector.SelectedItem is ComboBoxItem { Tag: string cl } ? cl : "Independent";
+
+        // AllResources wildcard for per-resource grants
+        var allResources = "ffffffff-ffff-ffff-ffff-ffffffffffff";
+
+        var permBody = JsonSerializer.Serialize(new
+        {
+            defaultClearance = clearance,
+
+            // Global flags with per-flag clearance
+            canCreateSubAgents = ChkCreateSubAgents.IsChecked == true,
+            createSubAgentsClearance = GetClearanceTag(ClrCreateSubAgents),
+            canCreateContainers = ChkCreateContainers.IsChecked == true,
+            createContainersClearance = GetClearanceTag(ClrCreateContainers),
+            canRegisterInfoStores = ChkRegisterInfoStores.IsChecked == true,
+            registerInfoStoresClearance = GetClearanceTag(ClrRegisterInfoStores),
+            canAccessLocalhostInBrowser = ChkLocalhostBrowser.IsChecked == true,
+            accessLocalhostInBrowserClearance = GetClearanceTag(ClrLocalhostBrowser),
+            canAccessLocalhostCli = ChkLocalhostCli.IsChecked == true,
+            accessLocalhostCliClearance = GetClearanceTag(ClrLocalhostCli),
+            canClickDesktop = ChkClickDesktop.IsChecked == true,
+            clickDesktopClearance = GetClearanceTag(ClrClickDesktop),
+            canTypeOnDesktop = ChkTypeOnDesktop.IsChecked == true,
+            typeOnDesktopClearance = GetClearanceTag(ClrTypeOnDesktop),
+
+            // Per-resource grants (wildcard) with per-resource clearance
+            safeShellAccesses = ChkSafeShell.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrSafeShell) } } : null,
+            dangerousShellAccesses = ChkDangerousShell.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrDangerousShell) } } : null,
+            containerAccesses = ChkContainerAccess.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrContainerAccess) } } : null,
+            websiteAccesses = ChkWebsiteAccess.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrWebsiteAccess) } } : null,
+            searchEngineAccesses = ChkSearchEngineAccess.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrSearchEngineAccess) } } : null,
+            localInfoStoreAccesses = ChkLocalInfoStore.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrLocalInfoStore) } } : null,
+            externalInfoStoreAccesses = ChkExternalInfoStore.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrExternalInfoStore) } } : null,
+            audioDeviceAccesses = ChkAudioDevice.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrAudioDevice) } } : null,
+            displayDeviceAccesses = ChkDisplayDevice.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrDisplayDevice) } } : null,
+            editorSessionAccesses = ChkEditorSession.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrEditorSession) } } : null,
+            agentAccesses = ChkAgentManagement.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrAgentManagement) } } : null,
+            taskAccesses = ChkTaskManagement.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrTaskManagement) } } : null,
+            skillAccesses = ChkSkillManagement.IsChecked == true
+                ? new[] { new { resourceId = allResources, clearance = GetClearanceTag(ClrSkillManagement) } } : null,
+        }, Json);
+
+        var permResp = await Api.PutAsync($"/roles/{roleId}/permissions",
+            new StringContent(permBody, Encoding.UTF8, "application/json"));
+
+        if (!permResp.IsSuccessStatusCode)
+        {
+            var errorText = await permResp.Content.ReadAsStringAsync();
+            throw new InvalidOperationException(
+                $"Failed to set permissions: {(int)permResp.StatusCode} {errorText}");
+        }
     }
 
     // ── Populate helpers ────────────────────────────────────────
@@ -618,9 +927,13 @@ public sealed partial class FirstSetupPage : Page
     [ImplicitKeys(IsEnabled = false)]
     private sealed partial record AgentDto(Guid Id, string Name, Guid ModelId, string ModelName, string ProviderName);
     [ImplicitKeys(IsEnabled = false)]
-    private sealed partial record ContextDto(Guid Id, string Name);
+    private sealed partial record ContextDto(Guid Id, string Name, ContextAgentDto? Agent = null);
+    [ImplicitKeys(IsEnabled = false)]
+    private sealed partial record ContextAgentDto(Guid Id, string? Name = null);
     [ImplicitKeys(IsEnabled = false)]
     private sealed partial record ChannelDto(Guid Id, string Title, Guid? ContextId);
     [ImplicitKeys(IsEnabled = false)]
     private sealed partial record ThreadDto(Guid Id, string Name, Guid ChannelId);
+    [ImplicitKeys(IsEnabled = false)]
+    private sealed partial record GgufFileDto(string DownloadUrl, string Filename, string? Quantization);
 }

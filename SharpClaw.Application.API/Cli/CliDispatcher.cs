@@ -22,6 +22,7 @@ using SharpClaw.Contracts.DTOs.DisplayDevices;
 using SharpClaw.Contracts.DTOs.LocalModels;
 using SharpClaw.Contracts.DTOs.Roles;
 using SharpClaw.Contracts.DTOs.Transcription;
+using SharpClaw.Contracts.DTOs.Users;
 using SharpClaw.Contracts.Enums;
 using SharpClaw.Infrastructure.Persistence;
 
@@ -211,6 +212,7 @@ public static class CliDispatcher
             "chat" => await HandleChatCommand(args, sp),
             "job" => await HandleJobCommand(args, sp),
             "role" => await HandleRoleCommand(args, sp),
+            "user" => await HandleUserCommand(args, sp),
             "resource" => await HandleResourceCommand(args, sp),
             "bio" => await HandleBioCommand(args, sp),
             "help" or "--help" or "-h" => PrintHelp(),
@@ -533,10 +535,10 @@ public static class CliDispatcher
         if (args.Length < 2)
         {
             PrintUsage(
-                "agent add <name> <modelId>  [system prompt]",
+                "agent add <name> <modelId>  [system prompt] [--max-tokens <n>]",
                 "agent get <id>",
                 "agent list",
-                "agent update <id> <name> [modelId] [system prompt]",
+                "agent update <id> <name> [modelId] [system prompt] [--max-tokens <n>]",
                 "agent role <id> <roleId>                  Assign a role (use 'role list')",
                 "agent role <id> none                      Remove role",
                 "agent sync-with-models                    Create default-<model> agents",
@@ -560,14 +562,8 @@ public static class CliDispatcher
             "list" => await AgentHandlers.List(svc),
 
             "update" when args.Length >= 4
-                => await AgentHandlers.Update(
-                    CliIdMap.Resolve(args[2]),
-                    new UpdateAgentRequest(
-                        args[3],
-                        args.Length >= 5 ? TryResolveId(args[4]) : null,
-                        args.Length >= 6 ? string.Join(' ', args[5..]) : null),
-                    svc),
-            "update" => UsageResult("agent update <id> <name> [modelId] [system prompt]"),
+                => await HandleAgentUpdate(args, svc),
+            "update" => UsageResult("agent update <id> <name> [modelId] [system prompt] [--max-tokens <n>]"),
 
             "role" when args.Length >= 4 && args[3].Equals("none", StringComparison.OrdinalIgnoreCase)
                 => await HandleAgentRoleAssign(CliIdMap.Resolve(args[2]), Guid.Empty, svc),
@@ -590,7 +586,7 @@ public static class CliDispatcher
     {
         try
         {
-            var result = await svc.AssignRoleAsync(agentId, roleId, _currentUserId);
+            var result = await svc.AssignRoleAsync(agentId, roleId);
             return result is not null ? Results.Ok(result) : Results.NotFound();
         }
         catch (UnauthorizedAccessException ex)
@@ -619,9 +615,55 @@ public static class CliDispatcher
             modelId = localFile.ModelId;
         }
 
-        var prompt = args.Length >= 5 ? string.Join(' ', args[4..]) : null;
+        // Separate flags from positional args (system prompt)
+        int? maxTokens = null;
+        var promptParts = new List<string>();
+        for (var i = 4; i < args.Length; i++)
+        {
+            if (args[i] is "--max-tokens" && i + 1 < args.Length && int.TryParse(args[i + 1], out var mt))
+            {
+                maxTokens = mt; i++;
+            }
+            else
+            {
+                promptParts.Add(args[i]);
+            }
+        }
+
+        var prompt = promptParts.Count > 0 ? string.Join(' ', promptParts) : null;
         return await AgentHandlers.Create(
-            new CreateAgentRequest(args[2], modelId, prompt), svc);
+            new CreateAgentRequest(args[2], modelId, prompt, maxTokens), svc);
+    }
+
+    private static async Task<IResult> HandleAgentUpdate(string[] args, AgentService svc)
+    {
+        var agentId = CliIdMap.Resolve(args[2]);
+        var name = args[3];
+
+        // Separate flags from positional args
+        int? maxTokens = null;
+        var positional = new List<string>();
+        for (var i = 4; i < args.Length; i++)
+        {
+            if (args[i] is "--max-tokens" && i + 1 < args.Length && int.TryParse(args[i + 1], out var mt))
+            {
+                maxTokens = mt; i++;
+            }
+            else
+            {
+                positional.Add(args[i]);
+            }
+        }
+
+        Guid? modelId = positional.Count >= 1 ? TryResolveId(positional[0]) : null;
+        string? prompt = null;
+        if (modelId is not null && positional.Count >= 2)
+            prompt = string.Join(' ', positional.Skip(1));
+        else if (modelId is null && positional.Count >= 1)
+            prompt = string.Join(' ', positional);
+
+        var request = new UpdateAgentRequest(name, modelId, prompt, maxTokens);
+        return await AgentHandlers.Update(agentId, request, svc);
     }
 
     private static async Task<IResult> HandleAgentSyncWithModels(AgentService svc)
@@ -1644,6 +1686,8 @@ public static class CliDispatcher
                 "job status <jobId>",
                 "job approve <jobId>",
                 "job stop <jobId>                           Stop a transcription job (complete)",
+                "job pause <jobId>                          Pause a long-running job",
+                "job resume <jobId>                         Resume a paused job",
                 "job cancel <jobId>",
                 "job listen <jobId>                         Stream live transcription segments",
                 "",
@@ -1658,7 +1702,8 @@ public static class CliDispatcher
                 "",
                 "Transcription: submit with TranscribeFromAudioDevice and audio device",
                 "  as resourceId.",
-                "  Optional flags: --model <id>, --lang <code>");
+                "  Optional flags: --model <id>, --lang <code>,",
+                "    --mode <sliding|simple|strict>, --window <seconds>, --step <seconds>");
             return Results.Ok();
         }
 
@@ -1703,6 +1748,14 @@ public static class CliDispatcher
                 => await AgentJobHandlers.Cancel(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
             "cancel" => UsageResult("job cancel <jobId>"),
 
+            "pause" when args.Length >= 3
+                => await AgentJobHandlers.Pause(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+            "pause" => UsageResult("job pause <jobId>"),
+
+            "resume" when args.Length >= 3
+                => await AgentJobHandlers.Resume(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+            "resume" => UsageResult("job resume <jobId>"),
+
             "listen" when args.Length >= 3
                 => await HandleJobListen(CliIdMap.Resolve(args[2]), svc),
             "listen" => UsageResult("job listen <jobId>"),
@@ -1723,6 +1776,9 @@ public static class CliDispatcher
         Guid? modelId = null;
         Guid? agentId = null;
         string? language = null;
+        TranscriptionMode? transcriptionMode = null;
+        int? windowSeconds = null;
+        int? stepSeconds = null;
 
         for (var i = flagStart; i < args.Length; i++)
         {
@@ -1737,6 +1793,23 @@ public static class CliDispatcher
                 case "--lang" or "-l" when i + 1 < args.Length:
                     language = args[++i];
                     break;
+                case "--mode" when i + 1 < args.Length:
+                    var modeArg = args[++i];
+                    if (string.Equals(modeArg, "strict", StringComparison.OrdinalIgnoreCase))
+                        transcriptionMode = TranscriptionMode.StrictSlidingWindow;
+                    else if (string.Equals(modeArg, "sliding", StringComparison.OrdinalIgnoreCase))
+                        transcriptionMode = TranscriptionMode.SlidingWindow;
+                    else if (Enum.TryParse<TranscriptionMode>(modeArg, true, out var m))
+                        transcriptionMode = m;
+                    break;
+                case "--window" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], out var w))
+                        windowSeconds = w;
+                    break;
+                case "--step" when i + 1 < args.Length:
+                    if (int.TryParse(args[++i], out var s))
+                        stepSeconds = s;
+                    break;
             }
         }
 
@@ -1747,7 +1820,10 @@ public static class CliDispatcher
                 resourceId,
                 AgentId: agentId,
                 TranscriptionModelId: modelId,
-                Language: language),
+                Language: language,
+                TranscriptionMode: transcriptionMode,
+                WindowSeconds: windowSeconds,
+                StepSeconds: stepSeconds),
             svc);
     }
 
@@ -2247,6 +2323,88 @@ public static class CliDispatcher
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // User administration
+    // ═══════════════════════════════════════════════════════════════
+
+    private static async Task<IResult?> HandleUserCommand(string[] args, IServiceProvider sp)
+    {
+        if (args.Length < 2)
+        {
+            PrintUsage(
+                "user list                                 List all users (admin only)",
+                "user role <userId> <roleId|none>           Assign a role to a user (admin only)");
+            return Results.Ok();
+        }
+
+        var sub = args[1].ToLowerInvariant();
+        var auth = sp.GetRequiredService<AuthService>();
+        var session = sp.GetRequiredService<SessionService>();
+
+        return sub switch
+        {
+            "list" => await HandleUserList(auth, session),
+
+            "role" when args.Length >= 4
+                => await HandleUserRole(args, auth, session),
+            "role" => UsageResult("user role <userId> <roleId|none>"),
+
+            _ => UsageResult($"Unknown sub-command: user {sub}. Try 'help' for usage.")
+        };
+    }
+
+    private static async Task<IResult> HandleUserList(AuthService auth, SessionService session)
+    {
+        if (session.UserId is not { } userId)
+            return Results.Unauthorized();
+
+        try
+        {
+            var users = await auth.ListUsersAsync(userId);
+            PrintJsonWithShortIds(users);
+            return Results.Ok();
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return Results.Ok();
+        }
+    }
+
+    private static async Task<IResult> HandleUserRole(
+        string[] args, AuthService auth, SessionService session)
+    {
+        if (session.UserId is not { } callerId)
+            return Results.Unauthorized();
+
+        var targetUserId = CliIdMap.Resolve(args[2]);
+        var roleId = args[3].Equals("none", StringComparison.OrdinalIgnoreCase)
+            ? Guid.Empty
+            : CliIdMap.Resolve(args[3]);
+
+        try
+        {
+            var result = await auth.SetUserRoleAsync(targetUserId, roleId, callerId);
+            if (result is null)
+            {
+                Console.Error.WriteLine("User not found.");
+                return Results.Ok();
+            }
+            PrintJsonWithShortIds(result);
+            return Results.Ok();
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return Results.Ok();
+        }
+        catch (ArgumentException ex)
+        {
+            Console.Error.WriteLine(ex.Message);
+            return Results.Ok();
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Bio
     // ═══════════════════════════════════════════════════════════════
 
@@ -2370,6 +2528,10 @@ public static class CliDispatcher
               Defaults: 50 messages, 100k chars. Set 0 to reset to default.
 
             Bio:       bio get | set <text> | clear
+
+            User:      user <sub> [args]        (admin only)
+              user list                          List all registered users
+              user role <userId> <roleId|none>   Assign or remove a user's role
 
             Job:       job <sub> [args]
               job submit <channelId> <actionType> [resourceId] [--agent <id>]
