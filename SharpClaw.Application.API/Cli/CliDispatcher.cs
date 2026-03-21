@@ -14,6 +14,7 @@ using SharpClaw.Contracts.DTOs.Chat;
 using SharpClaw.Contracts.DTOs.Contexts;
 using SharpClaw.Contracts.DTOs.Channels;
 using SharpClaw.Contracts.DTOs.Threads;
+using SharpClaw.Contracts.DTOs.Tasks;
 using SharpClaw.Contracts.DTOs.Models;
 using SharpClaw.Contracts.DTOs.Providers;
 using SharpClaw.Contracts.DTOs.Containers;
@@ -214,6 +215,7 @@ public static class CliDispatcher
             "role" => await HandleRoleCommand(args, sp),
             "user" => await HandleUserCommand(args, sp),
             "resource" => await HandleResourceCommand(args, sp),
+            "task" => await HandleTaskCommand(args, sp),
             "bio" => await HandleBioCommand(args, sp),
             "help" or "--help" or "-h" => PrintHelp(),
             _ => null
@@ -282,7 +284,9 @@ public static class CliDispatcher
                 "provider delete <providerId>",
                 "provider set-key <providerId> <apiKey>",
                 "provider login <providerId>",
-                "provider sync-models <providerId>");
+                "provider sync-models <providerId>",
+                "provider cost <providerId> [--days <n>]",
+                "provider cost-total [--days <n>]");
             return Results.Ok();
         }
 
@@ -338,6 +342,13 @@ public static class CliDispatcher
             "refresh-caps" when args.Length >= 3
                 => await HandleRefreshCaps(CliIdMap.Resolve(args[2]), svc),
             "refresh-caps" => UsageResult("provider refresh-caps <id>"),
+
+            "cost" when args.Length >= 3
+                => await HandleProviderCost(CliIdMap.Resolve(args[2]), ParseDaysFlag(args, 3), sp),
+            "cost" => UsageResult("provider cost <id> [--days <n>]"),
+
+            "cost-total"
+                => await HandleProviderCostTotal(ParseDaysFlag(args, 2), sp),
 
             _ => UsageResult($"Unknown sub-command: provider {sub}. Try 'help' for usage.")
         };
@@ -1107,6 +1118,7 @@ public static class CliDispatcher
                 "channel list [agentId]                     List channels",
                 "channel select <id>                        Select active channel",
                 "channel get <id>                           Show channel details",
+                "channel cost <id>                          Show token usage by agent",
                 "channel attach <id> <contextId>            Attach to a context",
                 "channel detach <id>                        Detach from context",
                 "channel agents <id>                        List allowed agents",
@@ -1137,6 +1149,10 @@ public static class CliDispatcher
             "get" when args.Length >= 3
                 => await ChannelHandlers.GetById(CliIdMap.Resolve(args[2]), svc),
             "get" => UsageResult("channel get <id>"),
+
+            "cost" when args.Length >= 3
+                => await ChatHandlers.ChannelCost(CliIdMap.Resolve(args[2]), sp.GetRequiredService<ChatService>()),
+            "cost" => UsageResult("channel cost <id>"),
 
             "attach" when args.Length >= 4
                 => await ChannelHandlers.Update(
@@ -1303,6 +1319,7 @@ public static class CliDispatcher
                 "  Create a thread (current channel if omitted)",
                 "thread list [channelId]                    List threads in a channel",
                 "thread get <id>                            Show thread details",
+                "thread cost <id>                           Show token usage by agent",
                 "thread update <id> [--name <name>] [--max-messages <n>] [--max-chars <n>]",
                 "  Rename a thread or change history limits (0 to reset to default)",
                 "thread select <id>                         Select active thread for chat",
@@ -1323,6 +1340,10 @@ public static class CliDispatcher
             "get" when args.Length >= 3
                 => await HandleThreadGet(CliIdMap.Resolve(args[2]), svc),
             "get" => UsageResult("thread get <id>"),
+
+            "cost" when args.Length >= 3
+                => await HandleThreadCost(CliIdMap.Resolve(args[2]), svc, sp.GetRequiredService<ChatService>()),
+            "cost" => UsageResult("thread cost <id>"),
 
             "update" when args.Length >= 3
                 => await HandleThreadUpdate(args, svc),
@@ -1422,6 +1443,14 @@ public static class CliDispatcher
 
     private static async Task<IResult> HandleThreadGet(Guid threadId, ThreadService svc)
         => await ThreadHandlers.GetById(Guid.Empty, threadId, svc);
+
+    private static async Task<IResult> HandleThreadCost(
+        Guid threadId, ThreadService threadSvc, ChatService chatSvc)
+    {
+        var thread = await threadSvc.GetByIdAsync(threadId);
+        if (thread is null) return Results.NotFound();
+        return await ChatHandlers.ThreadCost(thread.ChannelId, threadId, chatSvc);
+    }
 
     private static async Task<IResult> HandleThreadUpdate(string[] args, ThreadService svc)
     {
@@ -1709,12 +1738,13 @@ public static class CliDispatcher
 
         var sub = args[1].ToLowerInvariant();
         var svc = sp.GetRequiredService<AgentJobService>();
+        var chatSvc = sp.GetRequiredService<ChatService>();
 
         return sub switch
         {
             // job submit <channelId> <actionType> [resourceId] [flags...]
             "submit" when args.Length >= 4 && Enum.TryParse<AgentActionType>(args[3], true, out var at)
-                => await HandleJobSubmit(args, CliIdMap.Resolve(args[2]), at, 4, svc),
+                => await HandleJobSubmit(args, CliIdMap.Resolve(args[2]), at, 4, svc, chatSvc),
 
             "submit" when args.Length < 3
                 => UsageResult(
@@ -1730,30 +1760,30 @@ public static class CliDispatcher
             "list" => UsageResult("job list [channelId]  (no current channel selected — specify a channel ID or use 'channel select')"),
 
             "status" when args.Length >= 3
-                => await AgentJobHandlers.GetById(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+                => await AgentJobHandlers.GetById(Guid.Empty, CliIdMap.Resolve(args[2]), svc, chatSvc),
             "status" => UsageResult("job status <jobId>"),
 
             "approve" when args.Length >= 3
                 => await AgentJobHandlers.Approve(
                     Guid.Empty, CliIdMap.Resolve(args[2]),
                     new ApproveAgentJobRequest(),
-                    svc),
+                    svc, chatSvc),
             "approve" => UsageResult("job approve <jobId>"),
 
             "stop" when args.Length >= 3
-                => await AgentJobHandlers.Stop(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+                => await AgentJobHandlers.Stop(Guid.Empty, CliIdMap.Resolve(args[2]), svc, chatSvc),
             "stop" => UsageResult("job stop <jobId>"),
 
             "cancel" when args.Length >= 3
-                => await AgentJobHandlers.Cancel(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+                => await AgentJobHandlers.Cancel(Guid.Empty, CliIdMap.Resolve(args[2]), svc, chatSvc),
             "cancel" => UsageResult("job cancel <jobId>"),
 
             "pause" when args.Length >= 3
-                => await AgentJobHandlers.Pause(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+                => await AgentJobHandlers.Pause(Guid.Empty, CliIdMap.Resolve(args[2]), svc, chatSvc),
             "pause" => UsageResult("job pause <jobId>"),
 
             "resume" when args.Length >= 3
-                => await AgentJobHandlers.Resume(Guid.Empty, CliIdMap.Resolve(args[2]), svc),
+                => await AgentJobHandlers.Resume(Guid.Empty, CliIdMap.Resolve(args[2]), svc, chatSvc),
             "resume" => UsageResult("job resume <jobId>"),
 
             "listen" when args.Length >= 3
@@ -1765,7 +1795,7 @@ public static class CliDispatcher
     }
 
     private static async Task<IResult> HandleJobSubmit(
-        string[] args, Guid channelId, AgentActionType actionType, int nextArg, AgentJobService svc)
+        string[] args, Guid channelId, AgentActionType actionType, int nextArg, AgentJobService svc, ChatService chatSvc)
     {
         // Resource ID is the next positional arg, unless it looks like a flag
         Guid? resourceId = args.Length > nextArg && !args[nextArg].StartsWith("--")
@@ -1824,7 +1854,7 @@ public static class CliDispatcher
                 TranscriptionMode: transcriptionMode,
                 WindowSeconds: windowSeconds,
                 StepSeconds: stepSeconds),
-            svc);
+            svc, chatSvc);
     }
 
     private static async Task<IResult> HandleJobListen(Guid jobId, AgentJobService svc)
@@ -2084,6 +2114,300 @@ public static class CliDispatcher
         Console.WriteLine(updated > 0
             ? $"Updated capabilities for {updated} model(s)."
             : "All model capabilities are already up to date.");
+        return Results.Ok();
+    }
+
+    private static async Task<IResult> HandleProviderCost(Guid providerId, int days, IServiceProvider sp)
+    {
+        var costSvc = sp.GetRequiredService<ProviderCostService>();
+        return await ProviderHandlers.GetCost(providerId, costSvc, days);
+    }
+
+    private static async Task<IResult> HandleProviderCostTotal(int days, IServiceProvider sp)
+    {
+        var costSvc = sp.GetRequiredService<ProviderCostService>();
+        return await ProviderHandlers.GetCostTotal(costSvc, days);
+    }
+
+    private static int ParseDaysFlag(string[] args, int startIndex)
+    {
+        for (var i = startIndex; i < args.Length - 1; i++)
+        {
+            if (args[i] is "--days" && int.TryParse(args[i + 1], out var days) && days > 0)
+                return days;
+        }
+        return 30;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Task definitions & instances
+    // ═══════════════════════════════════════════════════════════════
+
+    private static async Task<IResult?> HandleTaskCommand(string[] args, IServiceProvider sp)
+    {
+        if (args.Length < 2)
+        {
+            PrintUsage(
+                "task create <sourceFilePath>             Create definition from .cs file",
+                "task list                                List all task definitions",
+                "task get <id>                            Show a task definition",
+                "task update <id> <sourceFilePath>        Update definition source",
+                "task activate <id>                       Activate a definition",
+                "task deactivate <id>                     Deactivate a definition",
+                "task delete <id>                         Delete a task definition",
+                "task start <taskId> [channelId] [--param key=value ...]",
+                "                                         Start a new instance",
+                "task instances <taskId>                  List instances of a definition",
+                "task instance <instanceId>               Show instance details",
+                "task outputs <instanceId> [--since <timestamp>]",
+                "                                         Get persisted output history",
+                "task cancel <instanceId>                 Cancel a running instance",
+                "task stop <instanceId>                   Stop a running instance",
+                "task listen <instanceId>                 Stream live task output");
+            return Results.Ok();
+        }
+
+        var sub = args[1].ToLowerInvariant();
+        var svc = sp.GetRequiredService<TaskService>();
+        var chatSvc = sp.GetRequiredService<ChatService>();
+
+        return sub switch
+        {
+            "create" when args.Length >= 3 => await HandleTaskCreate(args[2], svc),
+            "create" => UsageResult("task create <sourceFilePath>"),
+
+            "list" => await TaskDefinitionHandlers.List(svc),
+
+            "get" when args.Length >= 3
+                => await TaskDefinitionHandlers.GetById(CliIdMap.Resolve(args[2]), svc),
+            "get" => UsageResult("task get <id>"),
+
+            "update" when args.Length >= 4
+                => await HandleTaskUpdate(CliIdMap.Resolve(args[2]), args[3], svc),
+            "update" => UsageResult("task update <id> <sourceFilePath>"),
+
+            "activate" when args.Length >= 3
+                => await TaskDefinitionHandlers.Update(
+                    CliIdMap.Resolve(args[2]),
+                    new UpdateTaskDefinitionRequest(IsActive: true), svc),
+            "activate" => UsageResult("task activate <id>"),
+
+            "deactivate" when args.Length >= 3
+                => await TaskDefinitionHandlers.Update(
+                    CliIdMap.Resolve(args[2]),
+                    new UpdateTaskDefinitionRequest(IsActive: false), svc),
+            "deactivate" => UsageResult("task deactivate <id>"),
+
+            "delete" when args.Length >= 3
+                => await TaskDefinitionHandlers.Delete(CliIdMap.Resolve(args[2]), svc),
+            "delete" => UsageResult("task delete <id>"),
+
+            "start" when args.Length >= 3
+                => await HandleTaskStart(args, svc, sp),
+            "start" => UsageResult("task start <taskId> [channelId] [--param key=value ...]"),
+
+            "instances" when args.Length >= 3
+                => await TaskInstanceHandlers.List(CliIdMap.Resolve(args[2]), svc),
+            "instances" => UsageResult("task instances <taskId>"),
+
+            "instance" when args.Length >= 3
+                => await TaskInstanceHandlers.GetById(Guid.Empty, CliIdMap.Resolve(args[2]), svc, chatSvc),
+            "instance" => UsageResult("task instance <instanceId>"),
+
+            "outputs" when args.Length >= 3
+                => await HandleTaskOutputs(args, svc),
+            "outputs" => UsageResult("task outputs <instanceId> [--since <timestamp>]"),
+
+            "cancel" when args.Length >= 3
+                => await svc.CancelInstanceAsync(CliIdMap.Resolve(args[2]))
+                    ? Results.Ok("Instance cancelled.")
+                    : Results.NotFound(),
+            "cancel" => UsageResult("task cancel <instanceId>"),
+
+            "stop" when args.Length >= 3
+                => await HandleTaskStop(CliIdMap.Resolve(args[2]), sp),
+            "stop" => UsageResult("task stop <instanceId>"),
+
+            "listen" when args.Length >= 3
+                => await HandleTaskListen(CliIdMap.Resolve(args[2]), sp),
+            "listen" => UsageResult("task listen <instanceId>"),
+
+            _ => UsageResult($"Unknown sub-command: task {sub}. Try 'help' for usage.")
+        };
+    }
+
+    private static async Task<IResult> HandleTaskCreate(string sourceFilePath, TaskService svc)
+    {
+        if (!File.Exists(sourceFilePath))
+        {
+            Console.Error.WriteLine($"File not found: {sourceFilePath}");
+            return Results.Ok();
+        }
+
+        var sourceText = await File.ReadAllTextAsync(sourceFilePath);
+        return await TaskDefinitionHandlers.Create(
+            new CreateTaskDefinitionRequest(sourceText), svc);
+    }
+
+    private static async Task<IResult> HandleTaskUpdate(
+        Guid taskId, string sourceFilePath, TaskService svc)
+    {
+        if (!File.Exists(sourceFilePath))
+        {
+            Console.Error.WriteLine($"File not found: {sourceFilePath}");
+            return Results.Ok();
+        }
+
+        var sourceText = await File.ReadAllTextAsync(sourceFilePath);
+        return await TaskDefinitionHandlers.Update(
+            taskId, new UpdateTaskDefinitionRequest(SourceText: sourceText), svc);
+    }
+
+    private static async Task<IResult> HandleTaskStart(
+        string[] args, TaskService svc, IServiceProvider sp)
+    {
+        var taskId = CliIdMap.Resolve(args[2]);
+        Guid? channelId = args.Length > 3 && !args[3].StartsWith("--")
+            ? CliIdMap.Resolve(args[3])
+            : _currentChannelId;
+
+        var flagStart = channelId is not null && args.Length > 3 && !args[3].StartsWith("--")
+            ? 4 : 3;
+
+        Dictionary<string, string>? paramValues = null;
+        for (var i = flagStart; i < args.Length; i++)
+        {
+            if (args[i] is "--param" or "-p" && i + 1 < args.Length)
+            {
+                var kv = args[++i];
+                var eq = kv.IndexOf('=');
+                if (eq > 0)
+                {
+                    paramValues ??= [];
+                    paramValues[kv[..eq]] = kv[(eq + 1)..];
+                }
+            }
+        }
+
+        var session = sp.GetRequiredService<SessionService>();
+        var request = new StartTaskInstanceRequest(taskId, channelId, paramValues);
+        var result = await TaskInstanceHandlers.Start(
+            taskId, request, svc, session);
+
+        // Auto-start the orchestrator for the new instance.
+        if (result is IValueHttpResult { Value: TaskInstanceResponse resp })
+        {
+            var orchestrator = sp.GetRequiredService<TaskOrchestrator>();
+            _ = orchestrator.StartAsync(resp.Id);
+        }
+
+        return result;
+    }
+
+    private static async Task<IResult> HandleTaskStop(Guid instanceId, IServiceProvider sp)
+    {
+        var orchestrator = sp.GetRequiredService<TaskOrchestrator>();
+        await orchestrator.StopAsync(instanceId);
+        Console.WriteLine("Instance stopped.");
+        return Results.Ok();
+    }
+
+    private static async Task<IResult> HandleTaskOutputs(string[] args, TaskService svc)
+    {
+        var instanceId = CliIdMap.Resolve(args[2]);
+        DateTimeOffset? since = null;
+
+        for (var i = 3; i < args.Length; i++)
+        {
+            if (args[i] is "--since" && i + 1 < args.Length)
+            {
+                if (DateTimeOffset.TryParse(args[++i], out var ts))
+                    since = ts;
+                else
+                {
+                    Console.Error.WriteLine($"Invalid timestamp: {args[i]}");
+                    return Results.Ok();
+                }
+            }
+        }
+
+        return await TaskInstanceHandlers.GetOutputs(Guid.Empty, instanceId, svc, since);
+    }
+
+    private static async Task<IResult> HandleTaskListen(Guid instanceId, IServiceProvider sp)
+    {
+        var orchestrator = sp.GetRequiredService<TaskOrchestrator>();
+        var reader = orchestrator.GetOutputReader(instanceId);
+        if (reader is null)
+        {
+            Console.Error.WriteLine("No active output stream for this instance.");
+            Console.Error.WriteLine("The instance may not be running or was started in a previous session.");
+            return Results.Ok();
+        }
+
+        using var cts = new CancellationTokenSource();
+
+        var prevCtrlC = Console.TreatControlCAsInput;
+        Console.TreatControlCAsInput = true;
+
+        Console.WriteLine("Listening for task output... (Ctrl+C to stop)");
+        Console.WriteLine();
+
+        var keyTask = Task.Run(() =>
+        {
+            while (!cts.IsCancellationRequested)
+            {
+                if (Console.KeyAvailable)
+                {
+                    var key = Console.ReadKey(intercept: true);
+                    if (key is { Modifiers: ConsoleModifiers.Control, Key: ConsoleKey.C })
+                    {
+                        cts.Cancel();
+                        return;
+                    }
+                }
+
+                Thread.Sleep(50);
+            }
+        });
+
+        try
+        {
+            await foreach (var evt in reader.ReadAllAsync(cts.Token))
+            {
+                switch (evt.Type)
+                {
+                    case TaskOutputEventType.Output:
+                        Console.WriteLine($"  [output] {evt.Data}");
+                        break;
+                    case TaskOutputEventType.Log:
+                        Console.WriteLine($"  [log] {evt.Data}");
+                        break;
+                    case TaskOutputEventType.StatusChange:
+                        Console.WriteLine($"  [status] {evt.Data}");
+                        break;
+                    case TaskOutputEventType.Done:
+                        Console.WriteLine();
+                        Console.WriteLine("Task stream ended.");
+                        break;
+                }
+
+                if (evt.Type == TaskOutputEventType.Done)
+                    break;
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Console.WriteLine();
+            Console.WriteLine("Stopped listening.");
+        }
+        finally
+        {
+            await cts.CancelAsync();
+            await keyTask;
+            Console.TreatControlCAsInput = prevCtrlC;
+        }
+
         return Results.Ok();
     }
 
@@ -2538,6 +2862,20 @@ public static class CliDispatcher
                   [--model <id>] [--lang <code>]
               job list [channelId]   status <id>   approve <id>   cancel <id>
               job stop <id>          listen <id>   (transcription jobs)
+
+            Task:      task <sub> [args]
+              task create <sourceFilePath>       Create definition from .cs file
+              task list                          List all task definitions
+              task get <id>                      Show definition details
+              task update <id> <sourceFilePath>  Update definition source
+              task activate <id>                 Activate / deactivate <id>
+              task delete <id>                   Delete a task definition
+              task start <taskId> [channelId] [--param key=value ...]
+              task instances <taskId>            List instances of a definition
+              task instance <instanceId>         Show instance details
+              task cancel <instanceId>           Cancel a running instance
+              task stop <instanceId>             Stop a running instance
+              task listen <instanceId>           Stream live task output
 
             Resource:  resource <type> <sub>    (add, get, list, update, delete, sync)
               Types: container, audiodevice
