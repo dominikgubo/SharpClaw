@@ -46,6 +46,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         string? systemPrompt,
         IReadOnlyList<ChatCompletionMessage> messages,
         int? maxCompletionTokens = null,
+        Dictionary<string, JsonElement>? providerParameters = null,
         CancellationToken ct = default)
     {
         // Responses API path
@@ -55,7 +56,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
             await foreach (var chunk in StreamResponsesApiAsync(
                 httpClient, apiKey, model, systemPrompt,
                 messages.Select(m => new ToolAwareMessage { Role = m.Role, Content = m.Content }).ToList(),
-                [], maxCompletionTokens, ct))
+                [], maxCompletionTokens, providerParameters, ct))
             {
                 if (chunk.IsFinished)
                     return chunk.Finished!.Content
@@ -83,7 +84,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/chat/completions");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", resolvedKey);
         ConfigureRequest(request);
-        request.Content = JsonContent.Create(payload);
+        request.Content = MergeProviderParameters(payload, providerParameters);
 
         var response = await httpClient.SendAsync(request, ct);
         await response.EnsureSuccessOrThrowAsync(ct);
@@ -101,6 +102,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         IReadOnlyList<ToolAwareMessage> messages,
         IReadOnlyList<ChatToolDefinition> tools,
         int? maxCompletionTokens = null,
+        Dictionary<string, JsonElement>? providerParameters = null,
         CancellationToken ct = default)
     {
         // Responses API path
@@ -108,7 +110,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         {
             ChatCompletionResult? final = null;
             await foreach (var chunk in StreamResponsesApiAsync(
-                httpClient, apiKey, model, systemPrompt, messages, tools, maxCompletionTokens, ct))
+                httpClient, apiKey, model, systemPrompt, messages, tools, maxCompletionTokens, providerParameters, ct))
             {
                 if (chunk.IsFinished)
                     final = chunk.Finished;
@@ -145,7 +147,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/chat/completions");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", resolvedKey);
         ConfigureRequest(request);
-        request.Content = JsonContent.Create(payload, options: OaiToolJsonOptions);
+        request.Content = MergeProviderParameters(payload, providerParameters, OaiToolJsonOptions);
 
         var response = await httpClient.SendAsync(request, ct);
         await response.EnsureSuccessOrThrowAsync(ct);
@@ -229,13 +231,14 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         IReadOnlyList<ToolAwareMessage> messages,
         IReadOnlyList<ChatToolDefinition> tools,
         int? maxCompletionTokens = null,
+        Dictionary<string, JsonElement>? providerParameters = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         // Responses API path — delegate entirely
         if (UseResponsesApi(model))
         {
             await foreach (var chunk in StreamResponsesApiAsync(
-                httpClient, apiKey, model, systemPrompt, messages, tools, maxCompletionTokens, ct))
+                httpClient, apiKey, model, systemPrompt, messages, tools, maxCompletionTokens, providerParameters, ct))
             {
                 yield return chunk;
             }
@@ -271,7 +274,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/chat/completions");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", resolvedKey);
         ConfigureRequest(request);
-        request.Content = JsonContent.Create(payload, options: OaiToolJsonOptions);
+        request.Content = MergeProviderParameters(payload, providerParameters, OaiToolJsonOptions);
 
         using var response = await httpClient.SendAsync(
             request, HttpCompletionOption.ResponseHeadersRead, ct);
@@ -371,6 +374,17 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         => ValueTask.FromResult(apiKey);
 
     /// <summary>
+    /// Serializes <paramref name="payload"/> and merges any user-supplied
+    /// <paramref name="providerParameters"/> into the top-level JSON object.
+    /// Delegates to <see cref="ProviderParameterMerger"/>.
+    /// </summary>
+    protected static HttpContent MergeProviderParameters<T>(
+        T payload,
+        Dictionary<string, JsonElement>? providerParameters,
+        JsonSerializerOptions? options = null)
+        => ProviderParameterMerger.Merge(payload, providerParameters, options);
+
+    /// <summary>
     /// Allows subclasses to add provider-specific headers to outgoing API requests.
     /// </summary>
     protected virtual void ConfigureRequest(HttpRequestMessage request) { }
@@ -450,6 +464,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("max_tokens")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? MaxTokens { get; init; }
+        [JsonPropertyName("parallel_tool_calls")] public bool ParallelToolCalls { get; init; } = true;
     }
 
     private sealed class OaiToolDefinitionPayload
@@ -567,6 +582,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("max_tokens")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? MaxTokens { get; init; }
+        [JsonPropertyName("parallel_tool_calls")] public bool ParallelToolCalls { get; init; } = true;
     }
 
     private sealed class OaiStreamOptions
@@ -623,6 +639,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         IReadOnlyList<ToolAwareMessage> messages,
         IReadOnlyList<ChatToolDefinition> tools,
         int? maxCompletionTokens,
+        Dictionary<string, JsonElement>? providerParameters = null,
         [EnumeratorCancellation] CancellationToken ct = default)
     {
         var resolvedKey = await ResolveApiKeyAsync(httpClient, apiKey, ct);
@@ -710,7 +727,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/responses");
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", resolvedKey);
         ConfigureRequest(request);
-        request.Content = JsonContent.Create(payload, options: OaiToolJsonOptions);
+        request.Content = MergeProviderParameters(payload, providerParameters, OaiToolJsonOptions);
 
         using var response = await httpClient.SendAsync(
             request, HttpCompletionOption.ResponseHeadersRead, ct);
