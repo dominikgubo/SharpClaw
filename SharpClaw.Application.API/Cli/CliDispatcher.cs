@@ -217,6 +217,9 @@ public static class CliDispatcher
             "resource" => await HandleResourceCommand(args, sp),
             "task" => await HandleTaskCommand(args, sp),
             "bio" => await HandleBioCommand(args, sp),
+            "me" => await AuthHandlers.Me(
+                sp.GetRequiredService<SessionService>(),
+                sp.GetRequiredService<AuthService>()),
             "help" or "--help" or "-h" => PrintHelp(),
             _ => null
         };
@@ -286,7 +289,7 @@ public static class CliDispatcher
                 "provider login <providerId>",
                 "provider sync-models <providerId>",
                 "provider cost <providerId> [--days <n>]",
-                "provider cost-total [--days <n>]");
+                "provider cost-total [--days <n>] [--simple] [--all]");
             return Results.Ok();
         }
 
@@ -348,7 +351,7 @@ public static class CliDispatcher
             "cost" => UsageResult("provider cost <id> [--days <n>]"),
 
             "cost-total"
-                => await HandleProviderCostTotal(ParseDaysFlag(args, 2), sp),
+                => await HandleProviderCostTotal(args, sp),
 
             _ => UsageResult($"Unknown sub-command: provider {sub}. Try 'help' for usage.")
         };
@@ -366,7 +369,7 @@ public static class CliDispatcher
                 "  Capabilities (comma-separated): Chat, Transcription,",
                 "    ImageGeneration, Embedding, TextToSpeech",
                 "model get <id>",
-                "model list",
+                "model list [--provider <id>]           List models (optionally by provider)",
                 "model update <id> <name> [--cap <capabilities>]",
                 "model delete <id>",
                 "",
@@ -402,7 +405,7 @@ public static class CliDispatcher
                 => await ModelHandlers.GetById(CliIdMap.Resolve(args[2]), svc),
             "get" => UsageResult("model get <id>"),
 
-            "list" => await ModelHandlers.List(svc),
+            "list" => await HandleModelList(args, svc),
 
             "update" when args.Length >= 4
                 => await ModelHandlers.Update(
@@ -431,6 +434,20 @@ public static class CliDispatcher
 
             _ => UsageResult($"Unknown sub-command: model {sub}. Try 'help' for usage.")
         };
+    }
+
+    private static async Task<IResult> HandleModelList(string[] args, ModelService svc)
+    {
+        Guid? providerId = null;
+        for (var i = 2; i < args.Length; i++)
+        {
+            if (args[i] is "--provider" && i + 1 < args.Length)
+            {
+                providerId = CliIdMap.Resolve(args[++i]);
+                break;
+            }
+        }
+        return await ModelHandlers.List(svc, providerId);
     }
 
     // ── Local model CLI handlers ─────────────────────────────────
@@ -546,10 +563,10 @@ public static class CliDispatcher
         if (args.Length < 2)
         {
             PrintUsage(
-                "agent add <name> <modelId>  [system prompt] [--max-tokens <n>] [--params <json>]",
+                "agent add <name> <modelId>  [system prompt] [--max-tokens <n>] [--params <json>] [--header <template>]",
                 "agent get <id>",
                 "agent list",
-                "agent update <id> <name> [modelId] [system prompt] [--max-tokens <n>] [--params <json>]",
+                "agent update <id> <name> [modelId] [system prompt] [--max-tokens <n>] [--params <json>] [--header <template>]",
                 "agent role <id> <roleId>                  Assign a role (use 'role list')",
                 "agent role <id> none                      Remove role",
                 "agent sync-with-models                    Create default-<model> agents",
@@ -629,6 +646,16 @@ public static class CliDispatcher
         // Separate flags from positional args (system prompt)
         int? maxTokens = null;
         Dictionary<string, JsonElement>? providerParams = null;
+        float? temperature = null;
+        float? topP = null;
+        int? topK = null;
+        float? frequencyPenalty = null;
+        float? presencePenalty = null;
+        string[]? stop = null;
+        int? seed = null;
+        JsonElement? responseFormat = null;
+        string? reasoningEffort = null;
+        string? customChatHeader = null;
         var promptParts = new List<string>();
         for (var i = 4; i < args.Length; i++)
         {
@@ -642,6 +669,48 @@ public static class CliDispatcher
                 catch (JsonException ex) { Console.Error.WriteLine($"Invalid --params JSON: {ex.Message}"); return Results.BadRequest("Invalid --params JSON."); }
                 i++;
             }
+            else if (args[i] is "--temperature" or "--temp" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var temp))
+            {
+                temperature = temp; i++;
+            }
+            else if (args[i] is "--top-p" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var tp))
+            {
+                topP = tp; i++;
+            }
+            else if (args[i] is "--top-k" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tk))
+            {
+                topK = tk; i++;
+            }
+            else if (args[i] is "--frequency-penalty" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var fp))
+            {
+                frequencyPenalty = fp; i++;
+            }
+            else if (args[i] is "--presence-penalty" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var pp))
+            {
+                presencePenalty = pp; i++;
+            }
+            else if (args[i] is "--stop" && i + 1 < args.Length)
+            {
+                stop = args[i + 1].Split(','); i++;
+            }
+            else if (args[i] is "--seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
+            {
+                seed = sd; i++;
+            }
+            else if (args[i] is "--response-format" && i + 1 < args.Length)
+            {
+                try { responseFormat = JsonDocument.Parse(args[i + 1]).RootElement.Clone(); }
+                catch (JsonException ex) { Console.Error.WriteLine($"Invalid --response-format JSON: {ex.Message}"); return Results.BadRequest("Invalid --response-format JSON."); }
+                i++;
+            }
+            else if (args[i] is "--reasoning-effort" && i + 1 < args.Length)
+            {
+                reasoningEffort = args[i + 1]; i++;
+            }
+            else if (args[i] is "--header" && i + 1 < args.Length)
+            {
+                customChatHeader = args[i + 1]; i++;
+            }
             else
             {
                 promptParts.Add(args[i]);
@@ -650,7 +719,12 @@ public static class CliDispatcher
 
         var prompt = promptParts.Count > 0 ? string.Join(' ', promptParts) : null;
         return await AgentHandlers.Create(
-            new CreateAgentRequest(args[2], modelId, prompt, maxTokens, ProviderParameters: providerParams), svc);
+            new CreateAgentRequest(args[2], modelId, prompt, maxTokens,
+                Temperature: temperature, TopP: topP, TopK: topK,
+                FrequencyPenalty: frequencyPenalty, PresencePenalty: presencePenalty,
+                Stop: stop, Seed: seed, ResponseFormat: responseFormat,
+                ReasoningEffort: reasoningEffort, ProviderParameters: providerParams,
+                CustomChatHeader: customChatHeader), svc);
     }
 
     private static async Task<IResult> HandleAgentUpdate(string[] args, AgentService svc)
@@ -661,6 +735,16 @@ public static class CliDispatcher
         // Separate flags from positional args
         int? maxTokens = null;
         Dictionary<string, JsonElement>? providerParams = null;
+        float? temperature = null;
+        float? topP = null;
+        int? topK = null;
+        float? frequencyPenalty = null;
+        float? presencePenalty = null;
+        string[]? stop = null;
+        int? seed = null;
+        JsonElement? responseFormat = null;
+        string? reasoningEffort = null;
+        string? customChatHeader = null;
         var positional = new List<string>();
         for (var i = 4; i < args.Length; i++)
         {
@@ -673,6 +757,48 @@ public static class CliDispatcher
                 try { providerParams = JsonSerializer.Deserialize<Dictionary<string, JsonElement>>(args[i + 1]); }
                 catch (JsonException ex) { Console.Error.WriteLine($"Invalid --params JSON: {ex.Message}"); return Results.BadRequest("Invalid --params JSON."); }
                 i++;
+            }
+            else if (args[i] is "--temperature" or "--temp" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var temp))
+            {
+                temperature = temp; i++;
+            }
+            else if (args[i] is "--top-p" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var tp))
+            {
+                topP = tp; i++;
+            }
+            else if (args[i] is "--top-k" && i + 1 < args.Length && int.TryParse(args[i + 1], out var tk))
+            {
+                topK = tk; i++;
+            }
+            else if (args[i] is "--frequency-penalty" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var fp))
+            {
+                frequencyPenalty = fp; i++;
+            }
+            else if (args[i] is "--presence-penalty" && i + 1 < args.Length && float.TryParse(args[i + 1], System.Globalization.CultureInfo.InvariantCulture, out var pp))
+            {
+                presencePenalty = pp; i++;
+            }
+            else if (args[i] is "--stop" && i + 1 < args.Length)
+            {
+                stop = args[i + 1].Split(','); i++;
+            }
+            else if (args[i] is "--seed" && i + 1 < args.Length && int.TryParse(args[i + 1], out var sd))
+            {
+                seed = sd; i++;
+            }
+            else if (args[i] is "--response-format" && i + 1 < args.Length)
+            {
+                try { responseFormat = JsonDocument.Parse(args[i + 1]).RootElement.Clone(); }
+                catch (JsonException ex) { Console.Error.WriteLine($"Invalid --response-format JSON: {ex.Message}"); return Results.BadRequest("Invalid --response-format JSON."); }
+                i++;
+            }
+            else if (args[i] is "--reasoning-effort" && i + 1 < args.Length)
+            {
+                reasoningEffort = args[i + 1]; i++;
+            }
+            else if (args[i] is "--header" && i + 1 < args.Length)
+            {
+                customChatHeader = args[i + 1]; i++;
             }
             else
             {
@@ -687,7 +813,12 @@ public static class CliDispatcher
         else if (modelId is null && positional.Count >= 1)
             prompt = string.Join(' ', positional);
 
-        var request = new UpdateAgentRequest(name, modelId, prompt, maxTokens, ProviderParameters: providerParams);
+        var request = new UpdateAgentRequest(name, modelId, prompt, maxTokens,
+            Temperature: temperature, TopP: topP, TopK: topK,
+            FrequencyPenalty: frequencyPenalty, PresencePenalty: presencePenalty,
+            Stop: stop, Seed: seed, ResponseFormat: responseFormat,
+            ReasoningEffort: reasoningEffort, ProviderParameters: providerParams,
+            CustomChatHeader: customChatHeader);
         return await AgentHandlers.Update(agentId, request, svc);
     }
 
@@ -1127,7 +1258,7 @@ public static class CliDispatcher
         if (args.Length < 2)
         {
             PrintUsage(
-                "channel add [--agent <id>] [--context <id>] [title]",
+                "channel add [--agent <id>] [--context <id>] [--header <template>] [title]",
                 "  Either --agent or --context is required.",
                 "channel list [agentId]                     List channels",
                 "channel select <id>                        Select active channel",
@@ -1202,6 +1333,7 @@ public static class CliDispatcher
     {
         Guid? agentId = null;
         Guid? contextId = null;
+        string? customChatHeader = null;
         var titleParts = new List<string>();
 
         for (var i = 2; i < args.Length; i++)
@@ -1213,6 +1345,9 @@ public static class CliDispatcher
                     break;
                 case "--agent" or "-a" when i + 1 < args.Length:
                     agentId = CliIdMap.Resolve(args[++i]);
+                    break;
+                case "--header" when i + 1 < args.Length:
+                    customChatHeader = args[++i];
                     break;
                 default:
                     titleParts.Add(args[i]);
@@ -1229,7 +1364,7 @@ public static class CliDispatcher
         var title = titleParts.Count > 0 ? string.Join(' ', titleParts) : null;
 
         var result = await ChannelHandlers.Create(
-            new CreateChannelRequest(agentId, title, ContextId: contextId), svc);
+            new CreateChannelRequest(agentId, title, ContextId: contextId, CustomChatHeader: customChatHeader), svc);
 
         // Auto-select the newly created channel
         if (result is IValueHttpResult { Value: ChannelResponse ch })
@@ -1541,6 +1676,7 @@ public static class CliDispatcher
                 "  --localhost-cli                         Grant CanAccessLocalhostCli",
                 "  --click-desktop                         Grant CanClickDesktop",
                 "  --type-on-desktop                       Grant CanTypeOnDesktop",
+                "  --read-cross-thread-history             Grant CanReadCrossThreadHistory",
                 "  --dangerous-shell <id>[:<clearance>]    Add DangerousShell grant",
                 "  --safe-shell <id>[:<clearance>]         Add SafeShell grant",
                 "  --container <id>[:<clearance>]          Add Container grant",
@@ -1610,6 +1746,7 @@ public static class CliDispatcher
         var localhostCli = false;
         var clickDesktop = false;
         var typeOnDesktop = false;
+        var readCrossThreadHistory = false;
 
         var dangerousShell = new List<ResourceGrant>();
         var safeShell = new List<ResourceGrant>();
@@ -1638,6 +1775,7 @@ public static class CliDispatcher
                 case "--localhost-cli": localhostCli = true; break;
                 case "--click-desktop": clickDesktop = true; break;
                 case "--type-on-desktop": typeOnDesktop = true; break;
+                case "--read-cross-thread-history": readCrossThreadHistory = true; break;
                 case "--dangerous-shell" when i + 1 < args.Length:
                     dangerousShell.Add(ParseResourceGrant(args[++i])); break;
                 case "--safe-shell" when i + 1 < args.Length:
@@ -1672,6 +1810,7 @@ public static class CliDispatcher
             CanAccessLocalhostCli: localhostCli,
             CanClickDesktop: clickDesktop,
             CanTypeOnDesktop: typeOnDesktop,
+            CanReadCrossThreadHistory: readCrossThreadHistory,
             DangerousShellAccesses: dangerousShell.Count > 0 ? dangerousShell : null,
             SafeShellAccesses: safeShell.Count > 0 ? safeShell : null,
             ContainerAccesses: container.Count > 0 ? container : null,
@@ -2137,10 +2276,23 @@ public static class CliDispatcher
         return await ProviderHandlers.GetCost(providerId, costSvc, days);
     }
 
-    private static async Task<IResult> HandleProviderCostTotal(int days, IServiceProvider sp)
+    private static async Task<IResult> HandleProviderCostTotal(string[] args, IServiceProvider sp)
     {
+        var days = ParseDaysFlag(args, 2);
+        var simple = args.Skip(2).Any(a => a is "--simple");
+        var all = args.Skip(2).Any(a => a is "--all");
+
         var costSvc = sp.GetRequiredService<ProviderCostService>();
-        return await ProviderHandlers.GetCostTotal(costSvc, days);
+
+        if (simple)
+        {
+            var result = await costSvc.GetTotalCostAsync(days, includeAll: all);
+            var formatted = ProviderHandlers.FormatSimpleCost(result);
+            Console.WriteLine(formatted.Summary);
+            return Results.Ok();
+        }
+
+        return await ProviderHandlers.GetCostTotal(costSvc, days, all: all);
     }
 
     private static int ParseDaysFlag(string[] args, int startIndex)
@@ -2803,6 +2955,7 @@ public static class CliDispatcher
 
             Auth:
               register <user> <pass>          login <user> <pass>          logout
+              me                               Show current user profile & role
 
             Provider:  provider <sub> [args]    (add, get, list, update, delete)
               provider add <name> <type> [endpoint]

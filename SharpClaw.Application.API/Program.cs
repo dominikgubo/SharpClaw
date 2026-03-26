@@ -128,6 +128,7 @@ try
     builder.Services.AddScoped<ContextService>();
     builder.Services.AddScoped<AgentActionService>();
     builder.Services.AddScoped<AgentJobService>();
+    builder.Services.AddScoped<HeaderTagProcessor>();
     builder.Services.AddScoped<ChatService>();
     builder.Services.AddScoped<RoleService>();
     builder.Services.AddSingleton<LiveTranscriptionOrchestrator>();
@@ -138,6 +139,7 @@ try
     builder.Services.AddScoped<EditorSessionService>();
     builder.Services.AddSingleton<EditorBridgeService>();
     builder.Services.AddScoped<TaskService>();
+    builder.Services.AddScoped<EnvFileService>();
     builder.Services.AddScoped<TaskOrchestrator>();
 
     // Local inference (in-process via LLamaSharp)
@@ -195,8 +197,17 @@ try
     Mk8GlobalEnv.Load();
 
     // CLI mode: handle command and exit
-    if (await CliDispatcher.TryHandleAsync(args, app.Services))
+    try
+    {
+        if (await CliDispatcher.TryHandleAsync(args, app.Services))
+            return;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Error: {ex.Message}");
+        Log.Error(ex, "CLI command failed");
         return;
+    }
 
     // API mode
     app.UseMiddleware<ExceptionHandlingMiddleware>();
