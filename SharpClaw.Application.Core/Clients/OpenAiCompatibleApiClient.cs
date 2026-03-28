@@ -90,6 +90,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
             Stop = completionParameters?.Stop,
             Seed = completionParameters?.Seed,
             ResponseFormat = completionParameters?.ResponseFormat,
+            ReasoningEffort = completionParameters?.ReasoningEffort,
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/chat/completions");
@@ -145,6 +146,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
             Model = model,
             Messages = payloadMessages,
             MaxTokens = maxCompletionTokens,
+            ParallelToolCalls = true,
             Tools = tools.Select(t => new OaiToolDefinitionPayload
             {
                 Function = new OaiFunctionDefinitionPayload
@@ -161,6 +163,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
             Stop = completionParameters?.Stop,
             Seed = completionParameters?.Seed,
             ResponseFormat = completionParameters?.ResponseFormat,
+            ReasoningEffort = completionParameters?.ReasoningEffort,
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/chat/completions");
@@ -278,6 +281,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
             Model = model,
             Messages = payloadMessages,
             MaxTokens = maxCompletionTokens,
+            ParallelToolCalls = true,
             Tools = tools.Select(t => new OaiToolDefinitionPayload
             {
                 Function = new OaiFunctionDefinitionPayload
@@ -296,6 +300,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
             Stop = completionParameters?.Stop,
             Seed = completionParameters?.Seed,
             ResponseFormat = completionParameters?.ResponseFormat,
+            ReasoningEffort = completionParameters?.ReasoningEffort,
         };
 
         using var request = new HttpRequestMessage(HttpMethod.Post, $"{ApiEndpoint}/chat/completions");
@@ -492,6 +497,10 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("response_format")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public JsonElement? ResponseFormat { get; init; }
+
+        [JsonPropertyName("reasoning_effort")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReasoningEffort { get; init; }
     }
 
     private sealed record CompletionMessagePayload(
@@ -529,7 +538,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("max_tokens")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? MaxTokens { get; init; }
-        [JsonPropertyName("parallel_tool_calls")] public bool ParallelToolCalls { get; init; } = true;
+        [JsonPropertyName("parallel_tool_calls")] public bool ParallelToolCalls { get; init; }
         [JsonPropertyName("temperature")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public float? Temperature { get; init; }
@@ -551,6 +560,9 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("response_format")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public JsonElement? ResponseFormat { get; init; }
+        [JsonPropertyName("reasoning_effort")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReasoningEffort { get; init; }
     }
 
     private sealed class OaiToolDefinitionPayload
@@ -668,7 +680,7 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("max_tokens")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public int? MaxTokens { get; init; }
-        [JsonPropertyName("parallel_tool_calls")] public bool ParallelToolCalls { get; init; } = true;
+        [JsonPropertyName("parallel_tool_calls")] public bool ParallelToolCalls { get; init; }
         [JsonPropertyName("temperature")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public float? Temperature { get; init; }
@@ -690,6 +702,9 @@ public abstract class OpenAiCompatibleApiClient : IProviderApiClient
         [JsonPropertyName("response_format")]
         [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
         public JsonElement? ResponseFormat { get; init; }
+        [JsonPropertyName("reasoning_effort")]
+        [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+        public string? ReasoningEffort { get; init; }
     }
 
     private sealed class OaiStreamOptions

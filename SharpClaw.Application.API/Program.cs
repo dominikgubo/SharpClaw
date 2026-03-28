@@ -130,17 +130,20 @@ try
     builder.Services.AddScoped<AgentJobService>();
     builder.Services.AddScoped<HeaderTagProcessor>();
     builder.Services.AddScoped<ChatService>();
+    builder.Services.AddSingleton<ThreadActivitySignal>();
     builder.Services.AddScoped<RoleService>();
     builder.Services.AddSingleton<LiveTranscriptionOrchestrator>();
     builder.Services.AddScoped<TranscriptionService>();
     builder.Services.AddScoped<ContainerService>();
     builder.Services.AddScoped<DisplayDeviceService>();
     builder.Services.AddScoped<DefaultResourceSetService>();
+    builder.Services.AddScoped<ToolAwarenessSetService>();
     builder.Services.AddScoped<EditorSessionService>();
     builder.Services.AddSingleton<EditorBridgeService>();
     builder.Services.AddScoped<TaskService>();
     builder.Services.AddScoped<EnvFileService>();
     builder.Services.AddScoped<TaskOrchestrator>();
+    builder.Services.AddScoped<BotIntegrationService>();
 
     // Local inference (in-process via LLamaSharp)
     // Configure native library: prefer CUDA > Vulkan > CPU; suppress verbose logs.

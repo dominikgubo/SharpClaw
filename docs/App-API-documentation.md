@@ -55,12 +55,14 @@ fastest way to make that happen.
 - [Roles](#roles)
 - [Default resources](#default-resources)
 - [Local models](#local-models)
+- [Bot integrations](#bot-integrations)
 - [Editor bridge](#editor-bridge)
 - [Task definitions & instances](#task-definitions--instances)
 - [Token cost tracking](#token-cost-tracking)
 - [Provider cost](#provider-cost)
 - [Env file management](#env-file-management)
 - [Custom chat header](#custom-chat-header)
+- [Tool awareness sets](#tool-awareness-sets)
 - [Permission Resolution](#permission-resolution)
 
 ---
@@ -926,11 +928,18 @@ Start an OAuth device code flow for providers that require it (e.g. GitHub Copil
   "responseFormat": { "type": "json_object" } | null,
   "reasoningEffort": "string | null",
   "providerParameters": { "key": "value" },
-  "customChatHeader": "string | null"
+  "customChatHeader": "string | null",
+  "toolAwarenessSetId": "guid | null",
+  "disableToolSchemas": false
 }
 ```
 
-`maxCompletionTokens` caps the number of tokens the model may generate per
+`disableToolSchemas` suppresses all tool-call schemas and the tool
+instruction suffix from the model prompt. When `true`, the model sees
+only the system prompt and conversation history — no tools are offered.
+The channel's value overrides the agent's (`channel || agent`).
+
+`maxCompletionTokens` caps the number
 response. Sent as `max_tokens`, `max_completion_tokens`, or
 `max_output_tokens` depending on the provider and API version. `null`
 (default) means no limit — the provider default applies.
@@ -938,6 +947,10 @@ response. Sent as `max_tokens`, `max_completion_tokens`, or
 `customChatHeader` is an optional template string that overrides the
 default chat header for this agent. See [Custom chat header](#custom-chat-header)
 for the full tag reference and examples.
+
+`toolAwarenessSetId` links a [tool awareness set](#tool-awareness-sets)
+that controls which tool-call schemas are included in API requests.
+Channel's set overrides the agent's; `null` means all tools enabled.
 
 **First-class completion parameters** — `temperature`, `topP`, `topK`,
 `frequencyPenalty`, `presencePenalty`, `stop`, `seed`, `responseFormat`,
@@ -994,15 +1007,20 @@ overwritten.
   "responseFormat": { "type": "json_object" } | null,
   "reasoningEffort": "string | null",
   "providerParameters": { "key": "value" },
-  "customChatHeader": "string | null"
+  "customChatHeader": "string | null",
+  "toolAwarenessSetId": "guid | null",
+  "disableToolSchemas": "bool | null"
 }
 ```
 
-Pass `providerParameters` as `{}` (empty object) to clear existing
+Pass `providerParameters` as `{}`
 parameters.  Omit the field (or pass `null`) to leave them unchanged.
 
 `customChatHeader`: pass a template string to set, `""` (empty string)
 to clear, or `null` / omit to leave unchanged.
+
+`toolAwarenessSetId`: pass a GUID to assign, `Guid.Empty`
+(`00000000-...`) to clear, or `null` to leave unchanged.
 
 For typed completion parameters: omit a field (or pass `null`) to leave
 it unchanged. Pass `stop` as `[]` (empty array) to clear stop sequences.
@@ -1060,7 +1078,9 @@ Assign a role to an agent.
   "responseFormat": { "type": "json_object" } | null,
   "reasoningEffort": "string | null",
   "providerParameters": { "key": "value" },
-  "customChatHeader": "string | null"
+  "customChatHeader": "string | null",
+  "toolAwarenessSetId": "guid | null",
+  "disableToolSchemas": false
 }
 ```
 
@@ -1088,7 +1108,9 @@ Omits `systemPrompt` to keep payloads compact.
   "seed": "integer | null",
   "responseFormat": { "type": "json_object" } | null,
   "reasoningEffort": "string | null",
-  "providerParameters": { "key": "value" }
+  "providerParameters": { "key": "value" },
+  "toolAwarenessSetId": "guid | null",
+  "disableToolSchemas": false
 }
 ```
 
@@ -1254,13 +1276,21 @@ Request (example):
   "contextId": "guid | null",
   "permissionSetId": "guid | null",
   "allowedAgentIds": ["guid", ...] | null,
-  "customChatHeader": "string | null"
+  "customChatHeader": "string | null",
+  "toolAwarenessSetId": "guid | null",
+  "disableToolSchemas": false
 }
 ```
 
+`disableToolSchemas` suppresses all tool-call schemas for this channel,
+overriding the agent's setting. See [Tool awareness sets](#tool-awareness-sets).
+
 `customChatHeader` is an optional template string that overrides the
-agent's header (if any) for this channel. See
+agent's header
 [Custom chat header](#custom-chat-header) for the full tag reference.
+
+`toolAwarenessSetId` links a [tool awareness set](#tool-awareness-sets).
+Overrides the agent's set when present.
 
 `allowedAgentIds` specifies additional agents (beyond the default
 `agentId`) allowed to operate on this channel.
@@ -1290,14 +1320,22 @@ Request (example):
   "contextId": "guid | null",
   "permissionSetId": "guid | null",
   "allowedAgentIds": ["guid", ...] | null,
-  "customChatHeader": "string | null"
+  "customChatHeader": "string | null",
+  "toolAwarenessSetId": "guid | null",
+  "disableToolSchemas": "bool | null"
 }
 ```
 
 `customChatHeader`: pass a template string to set, `""` (empty string)
 to clear, or `null` / omit to leave unchanged.
 
-When `allowedAgentIds` is provided it replaces the current set.
+`toolAwarenessSetId`: pass a GUID to assign, `Guid.Empty`
+(`00000000-...`) to clear, or `null` to leave unchanged.
+
+`disableToolSchemas`: pass `true`/`false` to set, or `null` to leave
+unchanged.
+
+When `allowedAgentIds` is provided
 `permissionSetId` set to `Guid.Empty` removes the override; `null` leaves
 it unchanged.
 
@@ -1389,15 +1427,16 @@ Valid keys: `dangshell`, `safeshell`, `container`, `website`, `search`,
   "effectivePermissionSetId": "guid | null",
   "allowedAgents": [ { /* AgentSummary */ } ],
   "disableChatHeader": false,
+  "disableToolSchemas": false,
   "customChatHeader": "string | null",
+  "toolAwarenessSetId": "guid | null",
   "createdAt": "datetime",
   "updatedAt": "datetime"
 }
 ```
 
 `agent` and each entry in `allowedAgents` are full
-[`AgentSummary`](#agentsummary) objects (id, name, modelId, modelName,
-providerName, roleId, roleName, maxCompletionTokens).
+[`AgentSummary`](#agentsummary) objects.
 
 ### ChannelAllowedAgentsResponse
 
@@ -2574,6 +2613,101 @@ Delete the local model file and its DB record.
 
 ---
 
+## Bot integrations
+
+Bot integration rows are **pre-seeded** on startup for each `BotType`
+(`Telegram`, `Discord`, `WhatsApp`). There are no POST or DELETE
+endpoints — you only update existing rows to enable/disable a bot or
+set its token.
+
+Bot tokens are AES-GCM encrypted at rest (same mechanism as provider
+API keys).
+
+### GET /bots
+
+List all bot integrations.
+
+**Response `200`:** array of `BotIntegrationResponse`.
+
+### GET /bots/{id}
+
+Get a single bot integration by ID.
+
+**Response `200`:** `BotIntegrationResponse`.
+
+### GET /bots/type/{type}
+
+Get a bot integration by type name (`telegram`, `discord`, `whatsapp`).
+
+**Response `200`:** `BotIntegrationResponse`.
+
+### PUT /bots/{id}
+
+Update a bot integration. All fields are optional (partial update).
+
+**Request:**
+
+```json
+{
+  "enabled": true,
+  "botToken": "string | null",
+  "defaultChannelId": "guid | null"
+}
+```
+
+| Field | Behaviour |
+|---|---|
+| `enabled` | Enable or disable the bot. |
+| `botToken` | Non-empty string → encrypt and store. Empty string (`""`) → clear the stored token. Omit to leave unchanged. |
+| `defaultChannelId` | GUID → set the default SharpClaw channel for forwarded messages. `Guid.Empty` → clear. Omit to leave unchanged. |
+
+**Response `200`:** `BotIntegrationResponse`.
+
+### GET /bots/config/{type}
+
+Return the **decrypted** bot configuration for gateway consumption.
+Intended for internal use by the gateway process.
+
+**Response `200`:**
+
+```json
+{
+  "enabled": true,
+  "botToken": "plaintext-token",
+  "defaultChannelId": "guid | null"
+}
+```
+
+### BotIntegrationResponse
+
+```json
+{
+  "id": "guid",
+  "botType": "Telegram",
+  "enabled": false,
+  "hasBotToken": true,
+  "defaultChannelId": "guid | null",
+  "createdAt": "2025-01-01T00:00:00Z",
+  "updatedAt": "2025-01-01T00:00:00Z"
+}
+```
+
+`hasBotToken` indicates whether an encrypted token is stored — the
+actual token is never returned by list/get endpoints.
+
+### CLI
+
+```
+bot list                                        List all bot integrations
+bot get <id>                                    Show a single integration
+bot update <id> [--enabled true|false]          Enable/disable
+                [--token <tok>]                 Set bot token
+                [--channel <channelId>]          Set default channel
+bot config <type>                               Show decrypted config
+```
+
+---
+
 ## Editor bridge
 
 The editor bridge provides a WebSocket connection for IDE extensions
@@ -3109,6 +3243,7 @@ Overwrite the Core `.env` file with new content.
 | `Api:ListenUrl` | HTTP listen URL (default: `http://127.0.0.1:48923`) |
 | `Admin:Username` | Seeded admin username |
 | `Admin:Password` | Seeded admin password |
+| `Admin:ReconcilePermissions` | When `true`, reconcile the Admin role's permission set on every startup to back-fill newly added flags and wildcard grants (default: `false`) |
 | `Browser:Executable` | Chromium executable path for `AccessLocalhostInBrowser` |
 | `Browser:Arguments` | Extra browser launch arguments |
 | `Local:GpuLayerCount` | Default GPU layers for local inference (default: `-1` = auto) |
@@ -3345,6 +3480,135 @@ Users: marko hash=[redacted], admin hash=[redacted]
 
 When the agent has no cross-thread access or no accessible threads
 exist, the tag outputs `(none)`.
+
+---
+
+## Tool awareness sets
+
+A tool awareness set is a **reusable named configuration** that controls
+which tool-call schemas are sent in API requests. By disabling tools the
+agent will never use, you can **significantly reduce prompt-token
+overhead** — each tool schema adds hundreds of tokens to every request.
+
+### Override chain
+
+| Priority | Source | How to set |
+|----------|--------|------------|
+| 1 (highest) | `channel.disableToolSchemas` or `agent.disableToolSchemas` | `POST /channels`, `PUT /channels/{id}`, `POST /agents`, `PUT /agents/{id}`, CLI `--no-tools` |
+| 2 | Channel's `toolAwarenessSetId` | `POST /channels`, `PUT /channels/{id}`, CLI `channel add --tools <setId>` |
+| 3 | Agent's `toolAwarenessSetId` | `POST /agents`, `PUT /agents/{id}`, CLI `agent add --tools <setId>` |
+| 4 (default) | `null` — all tools enabled | Omit the field or set `Guid.Empty` to clear |
+
+When `disableToolSchemas` is `true` on either the channel or the agent
+(`channel || agent`), **no tool schemas or tool instruction suffix are
+sent** — the model sees only the system prompt and conversation history.
+This takes precedence over any tool awareness set.
+
+### Filtering logic
+
+Tools whose key is **`true`** or **absent** from the set's `tools`
+dictionary are included. Only tools explicitly set to `false` are
+excluded. This means a new tool awareness set with an empty dictionary
+(`{}`) enables all tools — you opt tools **out**, not in.
+
+### REST endpoints
+
+Route group: `/tool-awareness-sets`
+
+#### POST /tool-awareness-sets
+
+Create a new set.
+
+**Request:**
+
+```json
+{
+  "name": "string",
+  "tools": { "tool_name": true | false, ... } | null
+}
+```
+
+`tools` defaults to `{}` (empty — all tools enabled).
+
+**Response `200`:** `ToolAwarenessSetResponse`
+
+---
+
+#### GET /tool-awareness-sets
+
+List all sets.
+
+**Response `200`:** `ToolAwarenessSetResponse[]`
+
+---
+
+#### GET /tool-awareness-sets/{id}
+
+**Response `200`:** `ToolAwarenessSetResponse`
+**Response `404`:** Not found.
+
+---
+
+#### PUT /tool-awareness-sets/{id}
+
+**Request:**
+
+```json
+{
+  "name": "string | null",
+  "tools": { "tool_name": true | false, ... } | null
+}
+```
+
+Omit a field (or pass `null`) to leave it unchanged. Pass `tools` as
+`{}` (empty object) to reset to all-enabled.
+
+**Response `200`:** `ToolAwarenessSetResponse`
+**Response `404`:** Not found.
+
+---
+
+#### DELETE /tool-awareness-sets/{id}
+
+Deletes the set. Any agents or channels referencing it will have their
+`toolAwarenessSetId` set to `null` (cascade `SetNull`).
+
+**Response `204`:** Deleted.
+**Response `404`:** Not found.
+
+---
+
+### ToolAwarenessSetResponse
+
+```json
+{
+  "id": "guid",
+  "name": "string",
+  "tools": { "tool_name": true | false, ... },
+  "createdAt": "datetime",
+  "updatedAt": "datetime"
+}
+```
+
+### CLI
+
+```
+tools add <name> [json]                   Create a tool awareness set
+tools list                                List all tool awareness sets
+tools get <id>                            Show a set
+tools update <id> [--name <n>] [json]     Update a set
+tools delete <id>                         Delete a set
+```
+
+Assign to agents and channels with `--tools <setId>`.
+Disable all tools with `--no-tools`:
+
+```
+agent add MyAgent #42 --tools #5
+agent add MyAgent #42 --no-tools
+channel add --agent #3 --tools #5 "My Channel"
+channel add --agent #3 --no-tools "My Channel"
+```
 
 ---
 
