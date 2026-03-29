@@ -32,8 +32,9 @@ The gateway adds:
 - **Anti-spam** — body-size limits and content-type enforcement.
 - **Request queue** — sequential forwarding of mutation requests with
   retry, timeout, and bounded concurrency.
-- **Bot integrations** — Telegram and Discord hosted services that
-  relay messages to/from the core API.
+- **Bot integrations** — Telegram, Discord, WhatsApp, Slack, Matrix,
+  Signal, Email, and Microsoft Teams hosted services that relay
+  messages to/from the core API (DMs only).
 
 > **Default posture:** Out of the box, all public-facing REST/streaming
 > endpoints are **disabled**. Only the **Bots** endpoint group and the
@@ -72,6 +73,9 @@ has no access to `DbContext`, services, or business logic.
 - [Transcription](#transcription)
 - [Transcription streaming](#transcription-streaming)
 - [Bots](#bots)
+- [WhatsApp webhook](#whatsapp-webhook-endpoints)
+- [Slack webhook](#slack-webhook-endpoint)
+- [Teams webhook](#teams-webhook-endpoint)
 - [Error handling](#error-handling)
 - [Response headers](#response-headers)
 - [Rate limiting details](#rate-limiting-details)
@@ -213,6 +217,37 @@ A default `.env` is auto-created on first run if missing.
       "Discord": {
         "Enabled": "false",
         "BotToken": ""
+      },
+      "WhatsApp": {
+        "Enabled": "false",
+        "PhoneNumberId": "",
+        "VerifyToken": ""
+      },
+      "Slack": {
+        "Enabled": "false",
+        "SigningSecret": ""
+      },
+      "Matrix": {
+        "Enabled": "false",
+        "HomeserverUrl": ""
+      },
+      "Signal": {
+        "Enabled": "false",
+        "ApiUrl": "",
+        "PhoneNumber": ""
+      },
+      "Email": {
+        "Enabled": "false",
+        "ImapHost": "",
+        "ImapPort": "993",
+        "SmtpHost": "",
+        "SmtpPort": "587",
+        "Username": "",
+        "PollIntervalSeconds": "30"
+      },
+      "Teams": {
+        "Enabled": "false",
+        "AppId": ""
       }
     }
   }
@@ -256,6 +291,25 @@ A default `.env` is auto-created on first run if missing.
 | `Gateway:Bots:Telegram` | `BotToken` | *(empty)* | Token from @BotFather |
 | `Gateway:Bots:Discord` | `Enabled` | `false` | Enable Discord bot service |
 | `Gateway:Bots:Discord` | `BotToken` | *(empty)* | Token from Discord Developer Portal |
+| `Gateway:Bots:WhatsApp` | `Enabled` | `false` | Enable WhatsApp bot service |
+| `Gateway:Bots:WhatsApp` | `PhoneNumberId` | *(empty)* | WhatsApp Business phone number ID from Meta Cloud API |
+| `Gateway:Bots:WhatsApp` | `VerifyToken` | *(empty)* | Arbitrary token for Meta webhook verification |
+| `Gateway:Bots:Slack` | `Enabled` | `false` | Enable Slack bot service |
+| `Gateway:Bots:Slack` | `SigningSecret` | *(empty)* | Slack app signing secret for webhook verification |
+| `Gateway:Bots:Matrix` | `Enabled` | `false` | Enable Matrix bot service |
+| `Gateway:Bots:Matrix` | `HomeserverUrl` | *(empty)* | Matrix homeserver base URL (e.g. `https://matrix.org`) |
+| `Gateway:Bots:Signal` | `Enabled` | `false` | Enable Signal bot service |
+| `Gateway:Bots:Signal` | `ApiUrl` | *(empty)* | signal-cli REST API base URL (e.g. `http://localhost:8080`) |
+| `Gateway:Bots:Signal` | `PhoneNumber` | *(empty)* | Registered phone number in E.164 format |
+| `Gateway:Bots:Email` | `Enabled` | `false` | Enable Email bot service |
+| `Gateway:Bots:Email` | `ImapHost` | *(empty)* | IMAP server hostname |
+| `Gateway:Bots:Email` | `ImapPort` | `993` | IMAP server port (TLS) |
+| `Gateway:Bots:Email` | `SmtpHost` | *(empty)* | SMTP server hostname |
+| `Gateway:Bots:Email` | `SmtpPort` | `587` | SMTP server port (STARTTLS) |
+| `Gateway:Bots:Email` | `Username` | *(empty)* | Email account username / address |
+| `Gateway:Bots:Email` | `PollIntervalSeconds` | `30` | IMAP poll interval in seconds |
+| `Gateway:Bots:Teams` | `Enabled` | `false` | Enable Microsoft Teams bot service |
+| `Gateway:Bots:Teams` | `AppId` | *(empty)* | Microsoft App ID (GUID) from Azure Bot registration |
 
 ---
 
@@ -1033,7 +1087,7 @@ Lists all bot integrations from the core database.
 Creates a new bot integration. Triggers bot reload on success.
 
 ```json
-{ "name": "string", "botType": "Telegram",
+{ "name": "string", "botType": "Telegram|Discord|WhatsApp",
   "enabled": true, "botToken": "string",
   "defaultChannelId?": "guid", "defaultThreadId?": "guid" }
 ```
@@ -1088,7 +1142,8 @@ Returns the enabled/configured state of bot integrations.
 ```json
 {
   "telegram": { "enabled": true, "configured": false },
-  "discord":  { "enabled": false, "configured": false }
+  "discord":  { "enabled": false, "configured": false },
+  "whatsapp": { "enabled": false, "configured": false }
 }
 ```
 
@@ -1107,7 +1162,8 @@ decrypts them).
 ```json
 {
   "telegram": { "enabled": true, "botToken": "" },
-  "discord":  { "enabled": false, "botToken": "" }
+  "discord":  { "enabled": false, "botToken": "" },
+  "whatsapp": { "enabled": false, "botToken": "" }
 }
 ```
 
@@ -1121,7 +1177,8 @@ payload:
 ```json
 {
   "telegram": { "enabled": true, "botToken": "123:ABC" },
-  "discord":  { "enabled": false, "botToken": "" }
+  "discord":  { "enabled": false, "botToken": "" },
+  "whatsapp": { "enabled": false, "botToken": "" }
 }
 ```
 
@@ -1156,14 +1213,256 @@ Configuration: `Gateway:Bots:Telegram:Enabled` (default `true`) +
 ### Discord bot service
 
 `DiscordBotService` is a `BackgroundService` that connects to the
-Discord Gateway WebSocket (v10). It validates the token via
+Discord Gateway WebSocket (v10). On startup it fetches its configuration
+from the core API (`GET /bots/config/discord`), validates the token via
 `/users/@me`, sends `Identify` with intents
-`GUILDS | GUILD_MESSAGES | MESSAGE_CONTENT`, and handles heartbeating.
+`GUILDS | GUILD_MESSAGES | DIRECT_MESSAGES | MESSAGE_CONTENT`, and
+handles heartbeating.
+
 `MESSAGE_CREATE` events from non-bot users are forwarded to the core
-API in the same way as Telegram messages.
+API via `POST /channels/{channelId}/chat/threads/{threadId}` using the
+bot’s `defaultChannelId` and `defaultThreadId`. The core processes the
+message (including any agent tool calls) and returns a response, which
+the bot sends back to the Discord channel via the REST API
+(`POST /channels/{channelId}/messages`).
+
+The service automatically reloads its configuration when
+`BotReloadSignal` fires (e.g. after bot settings are changed via the
+gateway or the Uno settings page). Discord has a 2 000-character message
+limit; responses exceeding this are truncated.
 
 Configuration: `Gateway:Bots:Discord:Enabled` (default `false`) +
 `BotToken`.
+
+---
+
+### WhatsApp bot service
+
+`WhatsAppBotService` is a `BackgroundService` that manages the WhatsApp
+bot lifecycle. Unlike Telegram (polling) and Discord (WebSocket),
+WhatsApp Cloud API uses **webhooks** — Meta sends HTTP requests to the
+gateway when messages arrive.
+
+On startup the service fetches its configuration from the core API
+(`GET /bots/config/whatsapp`) for the access token, channel, and thread,
+then merges WhatsApp-specific settings from the gateway `.env`
+(`PhoneNumberId`, `VerifyToken`). It validates the Meta access token via
+`GET https://graph.facebook.com/v21.0/me`, and publishes the combined
+configuration to the `WhatsAppBotState` singleton so the webhook
+endpoints can process incoming messages.
+
+The service automatically reloads configuration when `BotReloadSignal`
+fires.
+
+Configuration:
+- Core database: `BotToken` (Meta Graph API access token),
+  `DefaultChannelId`, `DefaultThreadId`
+- Gateway `.env`: `Gateway:Bots:WhatsApp:Enabled` (default `false`),
+  `PhoneNumberId`, `VerifyToken`
+
+---
+
+### WhatsApp webhook endpoints
+
+Registered via minimal API (`MapWhatsAppWebhookProxy`). These handle
+the Meta Cloud API webhook protocol.
+
+#### GET /api/bots/whatsapp/webhook
+
+Meta webhook verification (subscription challenge-response).
+
+Query parameters:
+- `hub.mode` — must be `subscribe`
+- `hub.verify_token` — must match the gateway’s `VerifyToken`
+- `hub.challenge` — challenge string to echo back
+
+**200** → plain text challenge
+**400** → invalid `hub.mode`
+**401** → token mismatch
+**503** → bot not configured
+
+#### POST /api/bots/whatsapp/webhook
+
+Incoming message handler. Returns `200` immediately (Meta requires
+fast acknowledgement), then processes the message asynchronously:
+forwards text messages to the core API and replies via the WhatsApp
+Cloud API (`POST https://graph.facebook.com/v21.0/{phoneNumberId}/messages`).
+
+**200** → always (async processing)
+**503** → bot not configured
+
+---
+
+### Slack bot service
+
+`SlackBotService` is a `BackgroundService` that manages the Slack bot
+lifecycle. Like WhatsApp, Slack uses **webhooks** — Slack sends HTTP
+POST requests to the gateway when events occur (via the Events API).
+
+On startup the service fetches its configuration from the core API
+(`GET /bots/config/slack`) for the bot token, channel, and thread,
+then merges the Slack-specific signing secret from the gateway `.env`.
+It validates the token via `GET https://slack.com/api/auth.test` and
+publishes the combined configuration to the `SlackBotState` singleton
+so the webhook endpoint can process incoming events.
+
+Only direct messages (DMs) are processed — messages in channels and
+groups (where `channel_type` is not `im`) are ignored. Messages from
+other bots (`bot_id` present) and message subtypes (edits, file
+shares, etc.) are also skipped.
+
+Configuration:
+- Core database: `BotToken` (Slack Bot User OAuth Token),
+  `DefaultChannelId`, `DefaultThreadId`
+- Gateway `.env`: `Gateway:Bots:Slack:Enabled` (default `false`),
+  `SigningSecret`
+
+---
+
+### Slack webhook endpoint
+
+Registered via minimal API (`MapSlackWebhookProxy`). Handles the
+Slack Events API protocol.
+
+#### POST /api/bots/slack/events
+
+Incoming event handler. Supports two event types:
+
+- **`url_verification`** — returns the `challenge` field (Slack sends
+  this during app setup).
+- **`event_callback`** — processes `message` events with
+  `channel_type: "im"` (DMs only). Returns `200` immediately, then
+  forwards to the core API asynchronously.
+
+**200** → always (async processing / challenge response)
+**503** → bot not configured
+
+---
+
+### Matrix bot service
+
+`MatrixBotService` is a `BackgroundService` that long-polls the
+Matrix Client-Server API (`/sync`) for incoming messages. On startup
+it fetches its configuration from the core API
+(`GET /bots/config/matrix`), merges the homeserver URL from the
+gateway `.env`, validates the token via `/account/whoami`, resolves
+the DM room set from `m.direct` account data, then enters its sync
+loop.
+
+Only messages in DM rooms (rooms listed in `m.direct`) are processed;
+messages in group rooms are ignored. Messages from the initial sync
+(historical) are skipped.
+
+Replies are sent via
+`PUT /_matrix/client/v3/rooms/{roomId}/send/m.room.message/{txnId}`.
+
+Configuration:
+- Core database: `BotToken` (Matrix access token),
+  `DefaultChannelId`, `DefaultThreadId`
+- Gateway `.env`: `Gateway:Bots:Matrix:Enabled` (default `false`),
+  `HomeserverUrl`
+
+---
+
+### Signal bot service
+
+`SignalBotService` is a `BackgroundService` that polls the signal-cli
+REST API (`GET /v1/receive/{number}`) for incoming messages. Requires
+a running `signal-cli` REST API instance with a registered phone
+number.
+
+On startup it fetches its configuration from the core API
+(`GET /bots/config/signal`), merges `ApiUrl` and `PhoneNumber` from
+the gateway `.env`, validates the signal-cli API via
+`GET /v1/about`, then enters its poll loop.
+
+Only individual (non-group) messages are processed — messages with a
+`groupInfo` object in the envelope's `dataMessage` are ignored.
+
+Replies are sent via `POST /v2/send`.
+
+Configuration:
+- Core database: `BotToken` (unused — signal-cli handles auth),
+  `DefaultChannelId`, `DefaultThreadId`
+- Gateway `.env`: `Gateway:Bots:Signal:Enabled` (default `false`),
+  `ApiUrl`, `PhoneNumber`
+
+---
+
+### Email bot service
+
+`EmailBotService` is a `BackgroundService` that polls IMAP for
+unread messages and forwards them to the core API. Replies are sent
+via SMTP. Uses a minimal built-in IMAP client (TLS over
+`TcpClient`/`SslStream`) — no external mail libraries.
+
+Email is inherently 1:1, so no DM filtering is needed — every
+incoming message is treated as a direct message.
+
+On startup it fetches its configuration from the core API
+(`GET /bots/config/email`) for the password (stored as `BotToken`),
+merges IMAP/SMTP host, port, and username settings from the gateway
+`.env`, then enters its poll loop.
+
+The poll cycle: connect via IMAP TLS → `LOGIN` → `SELECT INBOX` →
+`SEARCH UNSEEN` → `FETCH` each message (From, Subject, Body) →
+`STORE +FLAGS (\Seen)` → forward to core → reply via SMTP.
+
+Configuration:
+- Core database: `BotToken` (email password),
+  `DefaultChannelId`, `DefaultThreadId`
+- Gateway `.env`: `Gateway:Bots:Email:Enabled` (default `false`),
+  `ImapHost`, `ImapPort` (993), `SmtpHost`, `SmtpPort` (587),
+  `Username`, `PollIntervalSeconds` (30)
+
+---
+
+### Teams bot service
+
+`TeamsBotService` is a `BackgroundService` that manages the Microsoft
+Teams bot lifecycle. Like WhatsApp and Slack, Teams uses **webhooks**
+— the Bot Framework sends HTTP POST requests to the gateway when
+activities arrive.
+
+On startup the service fetches its configuration from the core API
+(`GET /bots/config/teams`) for the client secret (stored as
+`BotToken`), channel, and thread, then merges the App ID from the
+gateway `.env`. It validates credentials via an Azure AD OAuth2
+client-credentials token request against
+`https://login.microsoftonline.com/botframework.com/oauth2/v2.0/token`
+and publishes the combined configuration to the `TeamsBotState`
+singleton.
+
+Only personal (1:1 DM) conversations are processed — activities where
+`conversation.conversationType` is not `personal` are ignored. Bot
+`@mention` text is stripped from the message before forwarding.
+
+Replies are sent via the Bot Framework REST API
+(`POST {serviceUrl}/v3/conversations/{id}/activities/{id}`) using an
+OAuth2 bearer token.
+
+Configuration:
+- Core database: `BotToken` (Azure AD client secret),
+  `DefaultChannelId`, `DefaultThreadId`
+- Gateway `.env`: `Gateway:Bots:Teams:Enabled` (default `false`),
+  `AppId`
+
+---
+
+### Teams webhook endpoint
+
+Registered via minimal API (`MapTeamsWebhookProxy`). Handles
+Bot Framework v3 activities.
+
+#### POST /api/bots/teams/messages
+
+Incoming activity handler. Returns `200` immediately, then processes
+the activity asynchronously. Only `message` activities with
+`conversation.conversationType: "personal"` (1:1 DMs) are forwarded
+to the core API.
+
+**200** → always (async processing)
+**503** → bot not configured
 
 ---
 
@@ -1253,13 +1552,31 @@ IP's ban counter. Exceeding **10 violations in 5 minutes** triggers a
 SharpClaw.Gateway/
 ├── Bots/
 │   ├── DiscordBotService.cs          BackgroundService — WebSocket Gateway v10
-│   └── TelegramBotService.cs         BackgroundService — HTTP long-polling
+│   ├── EmailBotService.cs            BackgroundService — IMAP polling + SMTP replies
+│   ├── MatrixBotService.cs           BackgroundService — /sync long-polling
+│   ├── SignalBotService.cs           BackgroundService — signal-cli REST polling
+│   ├── SlackBotService.cs            BackgroundService — config lifecycle (webhook)
+│   ├── SlackBotState.cs              Singleton config holder for Slack webhook proxy
+│   ├── SlackWebhookProxy.cs          Minimal API — Slack Events API endpoint
+│   ├── TeamsBotService.cs            BackgroundService — config lifecycle (webhook)
+│   ├── TeamsBotState.cs              Singleton config holder for Teams webhook proxy
+│   ├── TeamsWebhookProxy.cs          Minimal API — Bot Framework activity endpoint
+│   ├── TelegramBotService.cs         BackgroundService — HTTP long-polling
+│   ├── WhatsAppBotService.cs         BackgroundService — config lifecycle (webhook)
+│   ├── WhatsAppBotState.cs           Singleton config holder for WhatsApp webhook proxy
+│   └── WhatsAppWebhookProxy.cs       Minimal API — Meta webhook endpoints
 ├── Configuration/
 │   ├── DiscordBotOptions.cs           IOptions<T> for Gateway:Bots:Discord
+│   ├── EmailBotOptions.cs             IOptions<T> for Gateway:Bots:Email
 │   ├── GatewayEndpointOptions.cs      IOptions<T> for Gateway:Endpoints
 │   ├── GatewayEnvironment.cs          .env loader + default template
+│   ├── MatrixBotOptions.cs            IOptions<T> for Gateway:Bots:Matrix
 │   ├── RequestQueueOptions.cs         IOptions<T> for Gateway:RequestQueue
-│   └── TelegramBotOptions.cs          IOptions<T> for Gateway:Bots:Telegram
+│   ├── SignalBotOptions.cs            IOptions<T> for Gateway:Bots:Signal
+│   ├── SlackBotOptions.cs             IOptions<T> for Gateway:Bots:Slack
+│   ├── TeamsBotOptions.cs             IOptions<T> for Gateway:Bots:Teams
+│   ├── TelegramBotOptions.cs          IOptions<T> for Gateway:Bots:Telegram
+│   └── WhatsAppBotOptions.cs          IOptions<T> for Gateway:Bots:WhatsApp
 ├── Controllers/
 │   ├── AgentsController.cs            GET list, GET by id
 │   ├── AgentJobsController.cs         Full job lifecycle

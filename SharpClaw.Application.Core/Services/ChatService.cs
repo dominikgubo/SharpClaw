@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Text;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using SharpClaw.Application.Core.Clients;
@@ -21,7 +20,7 @@ using SharpClaw.Utils.Security;
 
 namespace SharpClaw.Application.Services;
 
-public sealed partial class ChatService(
+public sealed class ChatService(
     SharpClawDbContext db,
     EncryptionOptions encryptionOptions,
     ProviderApiClientFactory clientFactory,
@@ -110,9 +109,10 @@ public sealed partial class ChatService(
             lic.CurrentModelId = model.Id;
         var useNativeTools = client.SupportsNativeToolCalling;
         var disableTools = channel.DisableToolSchemas || agent.DisableToolSchemas;
-        var systemPrompt = disableTools
-            ? agent.SystemPrompt ?? ""
-            : BuildSystemPrompt(agent.SystemPrompt, useNativeTools);
+        var enableTools = !disableTools && useNativeTools;
+        var systemPrompt = enableTools
+            ? BuildSystemPrompt(agent.SystemPrompt)
+            : agent.SystemPrompt ?? "";
 
         // Build chat header for the user message (if enabled)
         var chatHeader = await BuildChatHeaderAsync(channel, agent, request.ClientType, request.EditorContext, ct,
@@ -131,24 +131,10 @@ public sealed partial class ChatService(
         var providerParams = _disableCustomProviderParameters ? null : agent.ProviderParameters;
         var completionParams = BuildCompletionParameters(agent);
         CompletionParameterValidator.ValidateOrThrow(completionParams, provider.ProviderType);
-        var toolAwareness = disableTools ? null : (channel.ToolAwarenessSet?.Tools ?? agent.ToolAwarenessSet?.Tools);
+        var toolAwareness = enableTools ? (channel.ToolAwarenessSet?.Tools ?? agent.ToolAwarenessSet?.Tools) : null;
 
-        var loopResult = disableTools
-            ? await RunTextToolLoopAsync(
-                client, httpClient, apiKey, model.Name, systemPrompt,
-                history, agent.Id, channelId, modelCapabilities, maxTokens, providerParams, completionParams, approvalCallback, ct,
-                taskContext: request.TaskContext)
-            : useNativeTools
-            ? await RunNativeToolLoopAsync(
-                client, httpClient, apiKey, model.Name, systemPrompt,
-                history, agent.Id, channelId, modelCapabilities, maxTokens, providerParams, completionParams, approvalCallback, ct,
-                taskContext: request.TaskContext, toolAwareness: toolAwareness)
-            : await RunTextToolLoopAsync(
-                client, httpClient, apiKey, model.Name, systemPrompt,
-                history, agent.Id, channelId, modelCapabilities, maxTokens, providerParams, completionParams, approvalCallback, ct,
-                taskContext: request.TaskContext);
-
-        // Persist both messages
+        // Persist user message immediately so it gets an accurate
+        // CreatedAt and survives crashes during LLM inference.
         var senderUserId = jobService.GetSessionUserId();
         var senderUsername = senderUserId.HasValue
             ? (await db.Users.Where(u => u.Id == senderUserId.Value).Select(u => u.Username).FirstOrDefaultAsync(ct))
@@ -165,6 +151,19 @@ public sealed partial class ChatService(
             ClientType = request.ClientType
         };
 
+        db.ChatMessages.Add(userMessage);
+        await db.SaveChangesAsync(ct);
+
+        var loopResult = enableTools
+            ? await RunNativeToolLoopAsync(
+                client, httpClient, apiKey, model.Name, systemPrompt,
+                history, agent.Id, channelId, modelCapabilities, maxTokens, providerParams, completionParams, approvalCallback, ct,
+                taskContext: request.TaskContext, toolAwareness: toolAwareness)
+            : await RunPlainCompletionAsync(
+                client, httpClient, apiKey, model.Name, systemPrompt,
+                history, maxTokens, providerParams, completionParams, ct);
+
+        // Persist assistant message after LLM completes
         var assistantMessage = new ChatMessageDB
         {
             Role = "assistant",
@@ -178,7 +177,6 @@ public sealed partial class ChatService(
             CompletionTokens = loopResult.TotalCompletionTokens > 0 ? loopResult.TotalCompletionTokens : null
         };
 
-        db.ChatMessages.Add(userMessage);
         db.ChatMessages.Add(assistantMessage);
         await db.SaveChangesAsync(ct);
 
@@ -414,7 +412,31 @@ public sealed partial class ChatService(
 
         // ── Task-sourced message: lightweight header, no user lookup ──
         if (taskContext is not null)
-            return await BuildTaskChatHeaderAsync(channel, agent, taskContext, ct);
+        {
+            var taskSb = new StringBuilder();
+            taskSb.Append("[time: ").Append(DateTimeOffset.UtcNow.ToString("yyyy-MM-dd HH:mm:ss 'UTC'"));
+            taskSb.Append(" | source: automated task");
+            taskSb.Append(" | task: ").Append(taskContext.TaskName);
+
+            var store = TaskSharedData.Get(taskContext.InstanceId);
+            if (store is not null)
+            {
+                var lightText = store.LightData;
+                if (lightText is not null)
+                    taskSb.Append(" | shared-data: ").Append(lightText);
+
+                var bigEntries = store.ListBig();
+                if (bigEntries.Count > 0)
+                {
+                    taskSb.Append(" | big-data-ids: [");
+                    taskSb.Append(string.Join(", ", bigEntries.Select(e => $"{e.Id}:\"{e.Title}\"")));
+                    taskSb.Append(']');
+                }
+            }
+
+            await AppendAgentSuffixAsync(taskSb, agent.Id, channel.Id, editorContext: null, ct);
+            return taskSb.ToString();
+        }
 
         // ── Custom header resolution: channel overrides agent ────────
         var customTemplate = channel.CustomChatHeader ?? agent.CustomChatHeader;
@@ -429,7 +451,17 @@ public sealed partial class ChatService(
 
         // ── External user (bot-forwarded message): no DB session ─────
         if (userId is null && externalUsername is not null)
-            return await BuildExternalUserHeaderAsync(channel, agent, clientType, externalUsername, externalDisplayName, ct);
+        {
+            var extSb = new StringBuilder();
+            extSb.Append("[time: ").Append(DateTimeOffset.UtcNow.ToString("yyyy-MM-dd HH:mm:ss 'UTC'"));
+            extSb.Append(" | user: ").Append(externalDisplayName ?? externalUsername);
+            if (externalDisplayName is not null && externalUsername != externalDisplayName)
+                extSb.Append(" (@").Append(externalUsername).Append(')');
+            extSb.Append(" | via: ").Append(clientType);
+
+            await AppendAgentSuffixAsync(extSb, agent.Id, channel.Id, editorContext: null, ct);
+            return extSb.ToString();
+        }
 
         if (userId is null)
             return null;
@@ -463,6 +495,7 @@ public sealed partial class ChatService(
                 .Include(p => p.SkillPermissions)
                 .Include(p => p.AgentHeaderAccesses)
                 .Include(p => p.ChannelHeaderAccesses)
+                .Include(p => p.BotIntegrationAccesses)
                 .AsSplitQuery()
                 .FirstOrDefaultAsync(p => p.Id == psId, ct);
         }
@@ -474,7 +507,7 @@ public sealed partial class ChatService(
 
         if (user.Role is not null && ps is not null)
         {
-            var grants = CollectGrants(ps);
+            var grants = await CollectGrantsWithResourcesAsync(ps, ct);
 
             if (grants.Count > 0)
                 sb.Append(" | role: ").Append(user.Role.Name)
@@ -486,11 +519,23 @@ public sealed partial class ChatService(
         if (!string.IsNullOrWhiteSpace(user.Bio))
             sb.Append(" | bio: ").Append(user.Bio);
 
-        // ── Agent self-awareness: own role, clearance, permissions ─
+        await AppendAgentSuffixAsync(sb, agent.Id, channel.Id, editorContext, ct);
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Appends the shared agent-role, policy, accessible-threads, optional
+    /// editor context, and closing bracket to a header being constructed.
+    /// Shared across all header paths (authenticated user, external user, task).
+    /// </summary>
+    private async Task AppendAgentSuffixAsync(
+        StringBuilder sb, Guid agentId, Guid channelId,
+        EditorContext? editorContext, CancellationToken ct)
+    {
         var agentWithRole = await db.Agents
             .Include(a => a.Role)
             .ThenInclude(r => r!.PermissionSet)
-            .FirstOrDefaultAsync(a => a.Id == agent.Id, ct);
+            .FirstOrDefaultAsync(a => a.Id == agentId, ct);
 
         if (agentWithRole?.Role is { } agentRole)
         {
@@ -512,6 +557,7 @@ public sealed partial class ChatService(
                     .Include(p => p.SkillPermissions)
                     .Include(p => p.AgentHeaderAccesses)
                     .Include(p => p.ChannelHeaderAccesses)
+                    .Include(p => p.BotIntegrationAccesses)
                     .AsSplitQuery()
                     .FirstOrDefaultAsync(p => p.Id == agentPsId, ct);
             }
@@ -524,14 +570,22 @@ public sealed partial class ChatService(
                 if (agentGrants.Count > 0)
                     sb.Append(" (").Append(string.Join(", ", agentGrants)).Append(')');
                 else
-                    sb.Append(" (no grants)");
+                    sb.Append(" (zero resource-grants — tool-calls unauthorized)");
             }
         }
         else
         {
-            // Agent has no role — emit a clear notice so the model knows it
-            // cannot use any tools that require permissions.
             sb.Append(" | agent-role: (none) clearance=Unset (no permissions)");
+        }
+
+        sb.Append(" | policy: unlisted-resource/GUID=denied; disclose gaps to user");
+
+        var accessibleThreads = await GetAccessibleThreadsAsync(agentId, channelId, ct);
+        if (accessibleThreads.Count > 0)
+        {
+            sb.Append(" | accessible-threads: ");
+            sb.Append(string.Join(", ", accessibleThreads.Select(
+                t => $"{t.ThreadName} [{t.ChannelTitle}] ({t.ThreadId:D})")));
         }
 
         if (editorContext is not null)
@@ -548,198 +602,14 @@ public sealed partial class ChatService(
         }
 
         sb.AppendLine("]");
-        return sb.ToString();
     }
 
     /// <summary>
-    /// Builds a header for bot-forwarded messages where there is no
-    /// authenticated DB user.  Uses the external username/display name
-    /// provided by the gateway from the messaging platform metadata.
-    /// </summary>
-    private async Task<string> BuildExternalUserHeaderAsync(
-        ChannelDB channel, AgentDB agent, ChatClientType clientType,
-        string externalUsername, string? externalDisplayName, CancellationToken ct)
-    {
-        var sb = new StringBuilder();
-        sb.Append("[time: ").Append(DateTimeOffset.UtcNow.ToString("yyyy-MM-dd HH:mm:ss 'UTC'"));
-        sb.Append(" | user: ").Append(externalDisplayName ?? externalUsername);
-        if (externalDisplayName is not null && externalUsername != externalDisplayName)
-            sb.Append(" (@").Append(externalUsername).Append(')');
-        sb.Append(" | via: ").Append(clientType);
-
-        // Agent self-awareness (same logic as the authenticated path)
-        var agentWithRole = await db.Agents
-            .Include(a => a.Role)
-            .ThenInclude(r => r!.PermissionSet)
-            .FirstOrDefaultAsync(a => a.Id == agent.Id, ct);
-
-        if (agentWithRole?.Role is { } agentRole)
-        {
-            PermissionSetDB? agentPs = null;
-            if (agentRole.PermissionSetId is { } agentPsId)
-            {
-                agentPs = await db.PermissionSets
-                    .Include(p => p.SafeShellAccesses)
-                    .Include(p => p.ContainerAccesses)
-                    .Include(p => p.WebsiteAccesses)
-                    .Include(p => p.SearchEngineAccesses)
-                    .Include(p => p.LocalInfoStorePermissions)
-                    .Include(p => p.ExternalInfoStorePermissions)
-                    .Include(p => p.AudioDeviceAccesses)
-                    .Include(p => p.DisplayDeviceAccesses)
-                    .Include(p => p.EditorSessionAccesses)
-                    .Include(p => p.AgentPermissions)
-                    .Include(p => p.TaskPermissions)
-                    .Include(p => p.SkillPermissions)
-                    .Include(p => p.AgentHeaderAccesses)
-                    .Include(p => p.ChannelHeaderAccesses)
-                    .AsSplitQuery()
-                    .FirstOrDefaultAsync(p => p.Id == agentPsId, ct);
-            }
-
-            sb.Append(" | agent-role: ").Append(agentRole.Name);
-            if (agentPs is not null)
-            {
-                sb.Append(" clearance=").Append(agentPs.DefaultClearance);
-                var agentGrants = await CollectGrantsWithResourcesAsync(agentPs, ct);
-                if (agentGrants.Count > 0)
-                    sb.Append(" (").Append(string.Join(", ", agentGrants)).Append(')');
-                else
-                    sb.Append(" (no grants)");
-            }
-        }
-        else
-        {
-            sb.Append(" | agent-role: (none) clearance=Unset (no permissions)");
-        }
-
-        sb.AppendLine("]");
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Builds a compact header for messages originating from an automated
-    /// task.  Unlike the user header, there is no session user — the
-    /// header identifies the task by name so the agent understands the
-    /// request is automated.  Includes light-shared-data inline and
-    /// big-shared-data IDs for tool-based retrieval.
-    /// </summary>
-    private async Task<string> BuildTaskChatHeaderAsync(
-        ChannelDB channel, AgentDB agent, TaskChatContext taskContext, CancellationToken ct)
-    {
-        var sb = new StringBuilder();
-        sb.Append("[time: ").Append(DateTimeOffset.UtcNow.ToString("yyyy-MM-dd HH:mm:ss 'UTC'"));
-        sb.Append(" | source: automated task");
-        sb.Append(" | task: ").Append(taskContext.TaskName);
-
-        // ── Shared data visible to the model ──
-        var store = TaskSharedData.Get(taskContext.InstanceId);
-        if (store is not null)
-        {
-            // Light data — plain text (≤500 words)
-            var lightText = store.LightData;
-            if (lightText is not null)
-            {
-                sb.Append(" | shared-data: ").Append(lightText);
-            }
-
-            // Big data — IDs + titles only (use task_read_big_data to get content)
-            var bigEntries = store.ListBig();
-            if (bigEntries.Count > 0)
-            {
-                sb.Append(" | big-data-ids: [");
-                sb.Append(string.Join(", ", bigEntries.Select(e => $"{e.Id}:\"{e.Title}\"")));
-                sb.Append(']');
-            }
-        }
-
-        // ── Agent self-awareness (same as user header) ──
-        var agentWithRole = await db.Agents
-            .Include(a => a.Role)
-            .ThenInclude(r => r!.PermissionSet)
-            .FirstOrDefaultAsync(a => a.Id == agent.Id, ct);
-
-        if (agentWithRole?.Role is { } agentRole)
-        {
-            PermissionSetDB? agentPs = null;
-            if (agentRole.PermissionSetId is { } agentPsId)
-            {
-                agentPs = await db.PermissionSets
-                    .Include(p => p.SafeShellAccesses)
-                    .Include(p => p.ContainerAccesses)
-                    .Include(p => p.WebsiteAccesses)
-                    .Include(p => p.SearchEngineAccesses)
-                    .Include(p => p.LocalInfoStorePermissions)
-                    .Include(p => p.ExternalInfoStorePermissions)
-                    .Include(p => p.AudioDeviceAccesses)
-                    .Include(p => p.DisplayDeviceAccesses)
-                    .Include(p => p.EditorSessionAccesses)
-                    .Include(p => p.AgentPermissions)
-                    .Include(p => p.TaskPermissions)
-                    .Include(p => p.SkillPermissions)
-                    .Include(p => p.AgentHeaderAccesses)
-                    .Include(p => p.ChannelHeaderAccesses)
-                    .AsSplitQuery()
-                    .FirstOrDefaultAsync(p => p.Id == agentPsId, ct);
-            }
-
-            sb.Append(" | agent-role: ").Append(agentRole.Name);
-            if (agentPs is not null)
-            {
-                sb.Append(" clearance=").Append(agentPs.DefaultClearance);
-                var agentGrants = await CollectGrantsWithResourcesAsync(agentPs, ct);
-                if (agentGrants.Count > 0)
-                    sb.Append(" (").Append(string.Join(", ", agentGrants)).Append(')');
-                else
-                    sb.Append(" (no grants)");
-            }
-        }
-        else
-        {
-            sb.Append(" | agent-role: (none) clearance=Unset (no permissions)");
-        }
-
-        sb.AppendLine("]");
-        return sb.ToString();
-    }
-
-    /// <summary>
-    /// Collects human-readable grant names from a permission set for
-    /// inclusion in the chat header.
-    /// </summary>
-    private static List<string> CollectGrants(PermissionSetDB ps)
-    {
-        var grants = new List<string>();
-        if (ps.CanCreateSubAgents) grants.Add("CreateSubAgents");
-        if (ps.CanCreateContainers) grants.Add("CreateContainers");
-        if (ps.CanRegisterInfoStores) grants.Add("RegisterInfoStores");
-        if (ps.CanAccessLocalhostInBrowser) grants.Add("LocalhostBrowser");
-        if (ps.CanAccessLocalhostCli) grants.Add("LocalhostCli");
-        if (ps.CanClickDesktop) grants.Add("ClickDesktop");
-        if (ps.CanTypeOnDesktop) grants.Add("TypeOnDesktop");
-        if (ps.CanReadCrossThreadHistory) grants.Add("ReadCrossThreadHistory");
-        if (ps.DangerousShellAccesses.Count > 0) grants.Add("DangerousShell");
-        if (ps.SafeShellAccesses.Count > 0) grants.Add("SafeShell");
-        if (ps.ContainerAccesses.Count > 0) grants.Add("ContainerAccess");
-        if (ps.WebsiteAccesses.Count > 0) grants.Add("WebsiteAccess");
-        if (ps.SearchEngineAccesses.Count > 0) grants.Add("SearchEngineAccess");
-        if (ps.LocalInfoStorePermissions.Count > 0) grants.Add("LocalInfoStore");
-        if (ps.ExternalInfoStorePermissions.Count > 0) grants.Add("ExternalInfoStore");
-        if (ps.AudioDeviceAccesses.Count > 0) grants.Add("AudioDevice");
-        if (ps.DisplayDeviceAccesses.Count > 0) grants.Add("DisplayDevice");
-        if (ps.EditorSessionAccesses.Count > 0) grants.Add("EditorSession");
-        if (ps.AgentPermissions.Count > 0) grants.Add("ManageAgent");
-        if (ps.TaskPermissions.Count > 0) grants.Add("EditTask");
-        if (ps.SkillPermissions.Count > 0) grants.Add("AccessSkill");
-        return grants;
-    }
-
-    /// <summary>
-    /// Collects grant names with enumerated resource IDs for the agent
-    /// self-awareness header. When a wildcard grant
+    /// Collects grant names with enumerated resource IDs for the chat
+    /// header (both user and agent sections). When a wildcard grant
     /// (<see cref="WellKnownIds.AllResources"/>) is present, all resource
-    /// IDs of that type are resolved from the database so the agent knows
-    /// exactly which resources it can act on.
+    /// IDs of that type are resolved from the database so the reader
+    /// knows exactly which resources the permission set covers.
     /// </summary>
     private async Task<List<string>> CollectGrantsWithResourcesAsync(
         PermissionSetDB ps, CancellationToken ct)
@@ -805,6 +675,10 @@ public sealed partial class ChatService(
         await AppendResourceGrantAsync(grants, "AccessSkill",
             ps.SkillPermissions.Select(a => a.SkillId),
             () => db.Skills.Select(s => s.Id).ToListAsync(ct), ct);
+
+        await AppendResourceGrantAsync(grants, "BotIntegration",
+            ps.BotIntegrationAccesses.Select(a => a.BotIntegrationId),
+            () => db.BotIntegrations.Select(b => b.Id).ToListAsync(ct), ct);
 
         return grants;
     }
@@ -928,7 +802,7 @@ public sealed partial class ChatService(
             streamLic.CurrentModelId = model.Id;
         var systemPrompt = channel.DisableToolSchemas || agent.DisableToolSchemas
             ? agent.SystemPrompt ?? ""
-            : BuildSystemPrompt(agent.SystemPrompt, nativeToolCalling: true);
+            : BuildSystemPrompt(agent.SystemPrompt);
 
         // Build chat header for the user message (if enabled)
         var chatHeader = await BuildChatHeaderAsync(channel, agent, request.ClientType, request.EditorContext, ct,
@@ -949,6 +823,27 @@ public sealed partial class ChatService(
         var effectiveTools = channel.DisableToolSchemas || agent.DisableToolSchemas
             ? []
             : GetEffectiveTools(request.TaskContext, toolAwareness);
+
+        // Persist user message immediately so it gets an accurate
+        // CreatedAt and survives crashes during LLM inference.
+        var senderUserId = jobService.GetSessionUserId();
+        var senderUsername = senderUserId.HasValue
+            ? (await db.Users.Where(u => u.Id == senderUserId.Value).Select(u => u.Username).FirstOrDefaultAsync(ct))
+            : request.ExternalDisplayName ?? request.ExternalUsername;
+
+        var userMessage = new ChatMessageDB
+        {
+            Role = "user",
+            Content = request.Message,
+            ChannelId = channelId,
+            ThreadId = threadId,
+            SenderUserId = senderUserId,
+            SenderUsername = senderUsername,
+            ClientType = request.ClientType
+        };
+
+        db.ChatMessages.Add(userMessage);
+        await db.SaveChangesAsync(ct);
 
         // Convert history to tool-aware messages
         var messages = new List<ToolAwareMessage>(history.Count);
@@ -1070,24 +965,8 @@ public sealed partial class ChatService(
             }
         }
 
-        // Persist both messages
+        // Persist assistant message after LLM completes
         var assistantContent = fullContent.ToString();
-
-        var senderUserId = jobService.GetSessionUserId();
-        var senderUsername = senderUserId.HasValue
-            ? (await db.Users.Where(u => u.Id == senderUserId.Value).Select(u => u.Username).FirstOrDefaultAsync(ct))
-            : request.ExternalDisplayName ?? request.ExternalUsername;
-
-        var userMessage = new ChatMessageDB
-        {
-            Role = "user",
-            Content = request.Message,
-            ChannelId = channelId,
-            ThreadId = threadId,
-            SenderUserId = senderUserId,
-            SenderUsername = senderUsername,
-            ClientType = request.ClientType
-        };
 
         var assistantMessage = new ChatMessageDB
         {
@@ -1102,7 +981,6 @@ public sealed partial class ChatService(
             CompletionTokens = totalCompletionTokens > 0 ? totalCompletionTokens : null
         };
 
-        db.ChatMessages.Add(userMessage);
         db.ChatMessages.Add(assistantMessage);
         await db.SaveChangesAsync(ct);
 
@@ -1898,119 +1776,30 @@ public sealed partial class ChatService(
     }
 
     /// <summary>
-    /// Text-based fallback for providers that lack native tool calling.
-    /// The model is instructed via the system prompt to emit
-    /// <c>[TOOL_CALL:...]</c> markers which are parsed post-hoc.
+    /// Simple single-call completion for providers without native tool support
+    /// or when tools are explicitly disabled.
     /// </summary>
-    private async Task<ToolLoopResult> RunTextToolLoopAsync(
+    private static async Task<ToolLoopResult> RunPlainCompletionAsync(
         IProviderApiClient client,
         HttpClient httpClient,
         string apiKey,
         string modelName,
         string systemPrompt,
         List<ChatCompletionMessage> history,
-        Guid agentId,
-        Guid channelId,
-        ModelCapability modelCapabilities,
         int? maxCompletionTokens,
         Dictionary<string, JsonElement>? providerParameters,
         CompletionParameters? completionParameters,
-        Func<AgentJobResponse, CancellationToken, Task<bool>>? approvalCallback,
-        CancellationToken ct,
-        TaskChatContext? taskContext = null)
+        CancellationToken ct)
     {
-        var supportsVision = modelCapabilities.HasFlag(ModelCapability.Vision);
-        var jobResults = new List<AgentJobResponse>();
-        string assistantContent;
-        var rounds = 0;
+        var result = await client.ChatCompletionAsync(
+            httpClient, apiKey, modelName, systemPrompt, history,
+            maxCompletionTokens, providerParameters, completionParameters, ct);
 
-        while (true)
-        {
-            assistantContent = await client.ChatCompletionAsync(
-                httpClient, apiKey, modelName, systemPrompt, history, maxCompletionTokens, providerParameters, completionParameters, ct);
-
-            var toolCalls = ParseToolCalls(assistantContent);
-            if (toolCalls.Count == 0 || ++rounds > MaxToolCallRounds)
-                break;
-
-            history.Add(new ChatCompletionMessage("assistant", assistantContent));
-
-            var toolResultBuilder = new StringBuilder();
-            var anyUnresolvableApproval = false;
-
-            foreach (var call in toolCalls)
-            {
-                // ── Task-specific tool interception (text-based) ──
-                var syntheticTc = new ChatToolCall(call.CallId, call.CallId, call.RawJson ?? call.ScriptJson ?? "{}");
-                var (handled, taskResult) = await TryHandleTaskToolAsync(syntheticTc, taskContext, ct);
-                if (handled)
-                {
-                    toolResultBuilder.AppendLine(
-                        $"[TOOL_RESULT:{call.CallId}] status=Completed result={taskResult}");
-                    continue;
-                }
-
-                // ── Inline tool interception (no permissions) ────
-                var (inlineHandled, inlineResult) = await TryHandleInlineToolAsync(syntheticTc, agentId, channelId, ct);
-                if (inlineHandled)
-                {
-                    toolResultBuilder.AppendLine(
-                        $"[TOOL_RESULT:{call.CallId}] status=Completed result={inlineResult}");
-                    continue;
-                }
-
-                var jobRequest = await BuildJobRequestAsync(call, agentId, ct);
-
-                var jobResponse = await jobService.SubmitAsync(channelId, jobRequest, ct);
-
-                // ── Inline approval (when callback available) ────
-                if (jobResponse.Status == AgentJobStatus.AwaitingApproval
-                    && approvalCallback is not null)
-                {
-                    var canApprove = await CanSessionUserApproveAsync(
-                        agentId, jobRequest.ActionType, jobRequest.ResourceId, ct);
-
-                    if (canApprove)
-                    {
-                        var approved = await approvalCallback(jobResponse, ct);
-                        jobResponse = approved
-                            ? await jobService.ApproveAsync(jobResponse.Id, new ApproveAgentJobRequest(), ct) ?? jobResponse
-                            : await jobService.CancelAsync(jobResponse.Id, ct) ?? jobResponse;
-                    }
-                    else
-                    {
-                        jobResponse = await jobService.CancelAsync(jobResponse.Id, ct) ?? jobResponse;
-                    }
-                }
-
-                jobResults.Add(jobResponse);
-
-                // For the text-based loop, screenshots are stripped from the
-                // result text because the simple ChatCompletionMessage doesn't
-                // support multipart content in the same way.
-                var (textResult, _) = ExtractScreenshotData(jobResponse);
-
-                toolResultBuilder.AppendLine(
-                    $"[TOOL_RESULT:{call.CallId}] status={jobResponse.Status}" +
-                    (textResult is not null ? $" result={textResult}" : "") +
-                    (jobResponse.ErrorLog is not null ? $" error={jobResponse.ErrorLog}" : ""));
-
-                if (jobResponse.Status == AgentJobStatus.AwaitingApproval)
-                    anyUnresolvableApproval = true;
-            }
-
-            history.Add(new ChatCompletionMessage("user", toolResultBuilder.ToString()));
-
-            if (anyUnresolvableApproval)
-            {
-                assistantContent = await client.ChatCompletionAsync(
-                    httpClient, apiKey, modelName, systemPrompt, history, maxCompletionTokens, providerParameters, completionParameters, ct);
-                break;
-            }
-        }
-
-        assistantContent = StripToolCallBlocks(assistantContent);
-        return new ToolLoopResult(assistantContent, jobResults);
+        return new ToolLoopResult(
+            result.Content ?? "",
+            [],
+            result.Usage?.PromptTokens ?? 0,
+            result.Usage?.CompletionTokens ?? 0);
     }
 
     /// <summary>
@@ -2111,6 +1900,7 @@ public sealed partial class ChatService(
         ["editor_show_diff"]               = AgentActionType.EditorShowDiff,
         ["editor_run_build"]               = AgentActionType.EditorRunBuild,
         ["editor_run_terminal"]            = AgentActionType.EditorRunTerminal,
+        ["send_bot_message"]               = AgentActionType.SendBotMessage,
     };
 
     // ═══════════════════════════════════════════════════════════════
@@ -2173,156 +1963,16 @@ public sealed partial class ChatService(
     }
 
     // ═══════════════════════════════════════════════════════════════
-    // Tool-call parsing (text-based fallback)
-    // ═══════════════════════════════════════════════════════════════
-
-    /// <summary>
-    /// Matches the <c>[TOOL_CALL:id]</c> marker emitted by the model.
-    /// The JSON payload that follows is extracted separately via
-    /// <see cref="ExtractJsonObject"/> to support nested objects
-    /// (e.g. mk8.shell scripts).
-    /// </summary>
-    [GeneratedRegex(
-        @"\[TOOL_CALL:(?<id>[^\]]+)\]\s*",
-        RegexOptions.Compiled | RegexOptions.Multiline)]
-    private static partial Regex ToolCallMarkerPattern();
-
-    /// <summary>
-    /// Extracts a balanced JSON object starting at <paramref name="startIndex"/>.
-    /// Returns <see langword="null"/> if the character at that position is not
-    /// <c>{</c> or if the braces never balance.
-    /// </summary>
-    private static string? ExtractJsonObject(string text, int startIndex)
-    {
-        if (startIndex >= text.Length || text[startIndex] != '{')
-            return null;
-
-        var depth = 0;
-        var inString = false;
-        var escaped = false;
-
-        for (var i = startIndex; i < text.Length; i++)
-        {
-            var c = text[i];
-
-            if (escaped) { escaped = false; continue; }
-            if (c == '\\' && inString) { escaped = true; continue; }
-            if (c == '"') { inString = !inString; continue; }
-            if (inString) continue;
-
-            if (c == '{') depth++;
-            else if (c == '}')
-            {
-                depth--;
-                if (depth == 0)
-                    return text[startIndex..(i + 1)];
-            }
-        }
-
-        return null;
-    }
-
-    private static IReadOnlyList<ParsedToolCall> ParseToolCalls(string content)
-    {
-        var markers = ToolCallMarkerPattern().Matches(content);
-        if (markers.Count == 0)
-            return [];
-
-        var calls = new List<ParsedToolCall>(markers.Count);
-        foreach (Match marker in markers)
-        {
-            var callId = marker.Groups["id"].Value;
-            var jsonStart = marker.Index + marker.Length;
-            var json = ExtractJsonObject(content, jsonStart);
-
-            if (json is null)
-                continue;
-
-            try
-            {
-                var payload = JsonSerializer.Deserialize<ToolCallPayload>(json, JsonOptions);
-                if (payload is not null)
-                {
-                    Guid? resourceId = Guid.TryParse(payload.ResourceId, out var rid) ? rid : null;
-                    resourceId ??= Guid.TryParse(payload.TargetId, out var tid) ? tid : null;
-
-                    // Default to mk8.shell for backwards compatibility
-                    var actionType = AgentActionType.ExecuteAsSafeShell;
-
-                    Guid? transcriptionModelId = Guid.TryParse(
-                        payload.TranscriptionModelId, out var tmid) ? tmid : null;
-
-                    DangerousShellType? dangerousShell = Enum.TryParse<DangerousShellType>(
-                        payload.ShellType, ignoreCase: true, out var ds) ? ds : null;
-
-                    if (dangerousShell.HasValue)
-                        actionType = AgentActionType.UnsafeExecuteAsDangerousShell;
-                    else if (transcriptionModelId.HasValue)
-                        actionType = AgentActionType.TranscribeFromAudioDevice;
-
-                    calls.Add(new ParsedToolCall(
-                        callId,
-                        actionType,
-                        resourceId,
-                        payload.SandboxId,
-                        payload.Script is { } script
-                            ? script.GetRawText()
-                            : payload.Command,
-                        dangerousShell,
-                        actionType == AgentActionType.ExecuteAsSafeShell
-                            ? SafeShellType.Mk8Shell : null,
-                        transcriptionModelId,
-                        payload.Language,
-                        payload.WorkingDirectory,
-                        json));
-                }
-            }
-            catch (JsonException)
-            {
-                // Malformed JSON — skip this call
-            }
-        }
-
-        return calls;
-    }
-
-    private static string StripToolCallBlocks(string content)
-    {
-        var markers = ToolCallMarkerPattern().Matches(content);
-        if (markers.Count == 0)
-            return content;
-
-        var sb = new StringBuilder(content);
-        for (var i = markers.Count - 1; i >= 0; i--)
-        {
-            var marker = markers[i];
-            var jsonStart = marker.Index + marker.Length;
-            var json = ExtractJsonObject(content, jsonStart);
-            var endIndex = json is not null
-                ? jsonStart + json.Length
-                : marker.Index + marker.Length;
-            sb.Remove(marker.Index, endIndex - marker.Index);
-        }
-
-        return sb.ToString().Trim();
-    }
-
-    // ═══════════════════════════════════════════════════════════════
     // System prompt & tool definitions (loaded from embedded resources)
     // ═══════════════════════════════════════════════════════════════
 
-    private static string BuildSystemPrompt(string? agentPrompt, bool nativeToolCalling)
+    private static string BuildSystemPrompt(string? agentPrompt)
     {
-        var suffix = nativeToolCalling ? NativeToolSystemSuffix : ToolInstructions;
-
         if (string.IsNullOrEmpty(agentPrompt))
-            return suffix;
+            return NativeToolSystemSuffix;
 
-        return agentPrompt + "\n\n" + suffix;
+        return agentPrompt + "\n\n" + NativeToolSystemSuffix;
     }
-
-    private static readonly string ToolInstructions =
-        LoadEmbeddedResource("SharpClaw.Application.Core.tool-instructions-text.md");
 
     private static readonly string NativeToolSystemSuffix =
         LoadEmbeddedResource("SharpClaw.Application.Core.tool-instructions-native-suffix.md");
@@ -2356,6 +2006,7 @@ public sealed partial class ChatService(
         var editorRunTerminalSchema = BuildEditorRunTerminalSchema();
         var waitSchema = BuildWaitSchema();
         var readThreadHistorySchema = BuildReadThreadHistorySchema();
+        var sendBotMessageSchema = BuildSendBotMessageSchema();
 
         return
         [
@@ -2369,109 +2020,72 @@ public sealed partial class ChatService(
                 "List readable threads from other channels (IDs, names, parent channel).",
                 globalSchema),
             new("read_thread_history",
-                "Read history from a cross-channel thread. Provide threadId; optional maxMessages (1–200, default 50).",
+                "Read cross-channel thread history. Optional maxMessages (1–200, default 50).",
                 readThreadHistorySchema),
 
             // ── Shell execution ───────────────────────────────
             new("execute_mk8_shell", Mk8ShellToolDescription, mk8Schema),
             new("execute_dangerous_shell",
-                "Execute a raw shell command (Bash/PowerShell/Cmd/Git). No sandboxing. Optional workingDirectory overrides default CWD.",
+                "Raw shell command (Bash/PowerShell/Cmd/Git), unsandboxed. Optional workingDirectory.",
                 dangerousShellSchema),
 
             // ── Transcription ────────────────────────────────
             new("transcribe_from_audio_device",
-                "Start live transcription from a system audio device.",
+                "Live-transcribe a system audio device.",
                 transcriptionSchema),
             new("transcribe_from_audio_stream",
-                "Transcribe an incoming audio stream. [Stub — not yet implemented.]",
+                "Transcribe audio stream. [Stub.]",
                 transcriptionSchema),
             new("transcribe_from_audio_file",
-                "Transcribe a pre-recorded audio file. [Stub — not yet implemented.]",
+                "Transcribe audio file. [Stub.]",
                 transcriptionSchema),
 
             // ── Global flags ─────────────────────────────────────
             new("create_sub_agent",
-                "Create a sub-agent. Provide name, modelId, and optional systemPrompt.",
+                "Create a sub-agent (name, modelId, optional systemPrompt).",
                 createSubAgentSchema),
             new("create_container",
-                "Create an mk8.shell sandbox container. Name: alphanumeric only.",
+                "Create an mk8.shell sandbox container. Alphanumeric name only.",
                 createContainerSchema),
             new("register_info_store",
-                "Register an information store. [Stub — not yet implemented.]",
+                "Register an information store. [Stub.]",
                 globalSchema),
             new("access_localhost_in_browser",
-                "Headless-browser GET on a localhost URL. mode='html' (default) returns DOM; 'screenshot' returns PNG (vision only). localhost/127.0.0.1 only.",
+                "Headless GET localhost. html=DOM (default), screenshot=PNG (vision). localhost/127.0.0.1 only.",
                 localhostBrowserSchema),
             new("access_localhost_cli",
-                "HTTP GET a localhost URL; returns status, headers, body. localhost/127.0.0.1 only.",
+                "HTTP GET localhost; returns status+headers+body. localhost/127.0.0.1 only.",
                 localhostCliSchema),
 
             // ── Per-resource ─────────────────────────────────────
-            new("access_local_info_store",
-                "Query a local information store. [Stub.]",
-                resourceOnly),
-            new("access_external_info_store",
-                "Query an external information store. [Stub.]",
-                resourceOnly),
-            new("access_website",
-                "Access a registered website. [Stub.]",
-                resourceOnly),
-            new("query_search_engine",
-                "Query a registered search engine. [Stub.]",
-                resourceOnly),
-            new("access_container",
-                "Access a container resource. [Stub.]",
-                resourceOnly),
-            new("manage_agent",
-                "Update an agent's name, systemPrompt, or modelId.",
-                manageAgentSchema),
-            new("edit_task",
-                "Edit a task's name, interval, or retry settings.",
-                editTaskSchema),
-            new("access_skill",
-                "Retrieve a skill's instruction text.",
-                resourceOnly),
-            new("capture_display",
-                "Screenshot a display. Returns base64 PNG (vision) or text description.",
-                resourceOnly),
-            new("click_desktop",
-                "Click at (x,y) on a display. Returns follow-up screenshot.",
-                clickDesktopSchema),
-            new("type_on_desktop",
-                "Type text via keyboard. Optional (x,y) click to focus first. Returns follow-up screenshot.",
-                typeOnDesktopSchema),
+            new("access_local_info_store", "Query local info store. [Stub.]", resourceOnly),
+            new("access_external_info_store", "Query external info store. [Stub.]", resourceOnly),
+            new("access_website", "Access registered website. [Stub.]", resourceOnly),
+            new("query_search_engine", "Query registered search engine. [Stub.]", resourceOnly),
+            new("access_container", "Access container resource. [Stub.]", resourceOnly),
+            new("manage_agent", "Update agent name, systemPrompt, or modelId.", manageAgentSchema),
+            new("edit_task", "Edit task name, interval, or retries.", editTaskSchema),
+            new("access_skill", "Retrieve a skill's instruction text.", resourceOnly),
+            new("capture_display", "Screenshot a display; base64 PNG (vision) or text fallback.", resourceOnly),
+            new("click_desktop", "Click (x,y) on display. Returns screenshot.", clickDesktopSchema),
+            new("type_on_desktop", "Type text; optional (x,y) to focus first. Returns screenshot.", typeOnDesktopSchema),
 
             // ── Editor actions ────────────────────────────────────
-            new("editor_read_file",
-                "Read a file from the IDE. Optional startLine/endLine for a range.",
-                editorReadFileSchema),
-            new("editor_get_open_files",
-                "List open files/tabs in the IDE.",
-                resourceOnly),
-            new("editor_get_selection",
-                "Get active file, cursor position, and selected text.",
-                resourceOnly),
-            new("editor_get_diagnostics",
-                "Get compilation errors/warnings. Optional filePath to scope.",
-                editorFileOptionalSchema),
-            new("editor_apply_edit",
-                "Replace a line range in a file with newText.",
-                editorApplyEditSchema),
-            new("editor_create_file",
-                "Create a file in the IDE workspace.",
-                editorCreateFileSchema),
-            new("editor_delete_file",
-                "Delete a file from the IDE workspace.",
-                editorFileRequiredSchema),
-            new("editor_show_diff",
-                "Show a diff view in the IDE. User can accept/reject.",
-                editorShowDiffSchema),
-            new("editor_run_build",
-                "Trigger a build and return output/errors.",
-                resourceOnly),
-            new("editor_run_terminal",
-                "Run a command in the IDE terminal.",
-                editorRunTerminalSchema),
+            new("editor_read_file", "Read file; optional line range.", editorReadFileSchema),
+            new("editor_get_open_files", "List open files/tabs.", resourceOnly),
+            new("editor_get_selection", "Active file, cursor, and selection.", resourceOnly),
+            new("editor_get_diagnostics", "Errors/warnings; optional filePath scope.", editorFileOptionalSchema),
+            new("editor_apply_edit", "Replace line range with newText.", editorApplyEditSchema),
+            new("editor_create_file", "Create file in workspace.", editorCreateFileSchema),
+            new("editor_delete_file", "Delete file from workspace.", editorFileRequiredSchema),
+            new("editor_show_diff", "Show diff; user accepts/rejects.", editorShowDiffSchema),
+            new("editor_run_build", "Trigger build; return output/errors.", resourceOnly),
+            new("editor_run_terminal", "Run command in IDE terminal.", editorRunTerminalSchema),
+
+            // ── Bot messaging ─────────────────────────────────────────
+            new("send_bot_message",
+                "Send DM via bot (Telegram/Discord/WhatsApp/Slack/Matrix/Signal/Email/Teams). recipientId is platform-specific; subject for email only.",
+                sendBotMessageSchema),
         ];
     }
 
@@ -2508,6 +2122,35 @@ public sealed partial class ChatService(
                     }
                 },
                 "required": ["threadId"]
+            }
+            """);
+        return doc.RootElement.Clone();
+    }
+
+    private static JsonElement BuildSendBotMessageSchema()
+    {
+        using var doc = JsonDocument.Parse("""
+            {
+                "type": "object",
+                "properties": {
+                    "resourceId": {
+                        "type": "string",
+                        "description": "Bot integration GUID."
+                    },
+                    "recipientId": {
+                        "type": "string",
+                        "description": "Platform-specific recipient: Telegram chat ID, Discord user ID, WhatsApp phone (E.164), Slack user ID, Matrix user ID (@user:server), Signal phone (E.164), email address, or Teams user ID."
+                    },
+                    "message": {
+                        "type": "string",
+                        "description": "Message text to send."
+                    },
+                    "subject": {
+                        "type": "string",
+                        "description": "Email subject line (email only, optional)."
+                    }
+                },
+                "required": ["resourceId", "recipientId", "message"]
             }
             """);
         return doc.RootElement.Clone();

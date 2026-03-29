@@ -88,8 +88,39 @@ public static class GatewayEnvironment
               "Discord": {
                 "Enabled": "false",
                 "BotToken": ""
+              },
+              "WhatsApp": {
+                  "Enabled": "false",
+                  "PhoneNumberId": "",
+                  "VerifyToken": ""
+                },
+                "Slack": {
+                  "Enabled": "false",
+                  "SigningSecret": ""
+                },
+                "Matrix": {
+                  "Enabled": "false",
+                  "HomeserverUrl": ""
+                },
+                "Signal": {
+                  "Enabled": "false",
+                  "ApiUrl": "",
+                  "PhoneNumber": ""
+                },
+                "Email": {
+                  "Enabled": "false",
+                  "ImapHost": "",
+                  "ImapPort": "993",
+                  "SmtpHost": "",
+                  "SmtpPort": "587",
+                  "Username": "",
+                  "PollIntervalSeconds": "30"
+                },
+                "Teams": {
+                  "Enabled": "false",
+                  "AppId": ""
+                }
               }
-            }
           }
         }
         """;

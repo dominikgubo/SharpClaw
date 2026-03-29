@@ -41,9 +41,41 @@ builder.Services.AddHttpContextAccessor();
 builder.Services.AddSingleton<BotReloadSignal>();
 builder.Services.AddHttpClient("TelegramBot");
 builder.Services.AddHttpClient("DiscordBot");
+builder.Services.AddHttpClient("WhatsAppBot");
+builder.Services.AddHttpClient("SlackBot");
+builder.Services.AddHttpClient("MatrixBot");
+builder.Services.AddHttpClient("SignalBot");
+builder.Services.AddHttpClient("TeamsBot");
+
+builder.Services.Configure<WhatsAppBotOptions>(
+    builder.Configuration.GetSection(WhatsAppBotOptions.SectionName));
+builder.Services.AddSingleton<WhatsAppBotState>();
+
+builder.Services.Configure<SlackBotOptions>(
+    builder.Configuration.GetSection(SlackBotOptions.SectionName));
+builder.Services.AddSingleton<SlackBotState>();
+
+builder.Services.Configure<MatrixBotOptions>(
+    builder.Configuration.GetSection(MatrixBotOptions.SectionName));
+
+builder.Services.Configure<SignalBotOptions>(
+    builder.Configuration.GetSection(SignalBotOptions.SectionName));
+
+builder.Services.Configure<EmailBotOptions>(
+    builder.Configuration.GetSection(EmailBotOptions.SectionName));
+
+builder.Services.Configure<TeamsBotOptions>(
+    builder.Configuration.GetSection(TeamsBotOptions.SectionName));
+builder.Services.AddSingleton<TeamsBotState>();
 
 builder.Services.AddHostedService<TelegramBotService>();
 builder.Services.AddHostedService<DiscordBotService>();
+builder.Services.AddHostedService<WhatsAppBotService>();
+builder.Services.AddHostedService<SlackBotService>();
+builder.Services.AddHostedService<MatrixBotService>();
+builder.Services.AddHostedService<SignalBotService>();
+builder.Services.AddHostedService<EmailBotService>();
+builder.Services.AddHostedService<TeamsBotService>();
 
 // ── Security ─────────────────────────────────────────────────────
 builder.Services.AddSingleton<IpBanService>();
@@ -214,5 +246,8 @@ app.UseAuthorization();
 app.MapControllers();
 app.MapTranscriptionStreamingProxy();
 app.MapChatStreamProxy();
+app.MapWhatsAppWebhookProxy();
+app.MapSlackWebhookProxy();
+app.MapTeamsWebhookProxy();
 
 app.Run();
