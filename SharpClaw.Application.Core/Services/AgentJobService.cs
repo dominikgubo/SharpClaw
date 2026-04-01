@@ -7,6 +7,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Mk8.Shell;
 using Mk8.Shell.Engine;
+using Mk8.Shell.Isolation;
 using Mk8.Shell.Models;
 using Mk8.Shell.Safety;
 using Mk8.Shell.Startup;
@@ -823,7 +824,7 @@ IConfiguration configuration)
 
         // mk8.shell is self-contained: pass the sandbox name and it
         // resolves everything from its own local registry.
-        using var taskContainer = Mk8TaskContainer.Create(container.SandboxName);
+        await using var taskContainer = await Mk8TaskContainer.CreateAsync(container.SandboxName, ct: ct);
 
         var effectiveOptions = script.Options ?? Mk8ExecutionOptions.Default;
 
@@ -844,7 +845,12 @@ IConfiguration configuration)
         await db.SaveChangesAsync(ct);
 
         // Execute all compiled commands (safe — never spawns a real shell).
-        var executor = new Mk8ShellExecutor();
+        // The sandbox container provides OS-level process containment,
+        // resource limits, network iron curtain, and filesystem isolation.
+        // The container is persistent — managed by Mk8ContainerManager,
+        // not created/destroyed per command.
+        var executor = new Mk8ShellExecutor(
+            sandboxContainer: taskContainer.SandboxContainer);
         var result = await executor.ExecuteAsync(compiled, ct);
 
         // Build a human-readable summary for ResultData.
@@ -1086,7 +1092,7 @@ IConfiguration configuration)
             throw new InvalidOperationException(
                 $"An mk8shell container with sandbox name '{sandboxName}' already exists.");
 
-        Mk8SandboxRegistrar.Register(sandboxName, sandboxDir);
+        await Mk8SandboxRegistrar.RegisterAsync(sandboxName, sandboxDir, ct: ct);
 
         var container = new ContainerDB
         {
@@ -1507,8 +1513,8 @@ IConfiguration configuration)
     /// <summary>
     /// Captures a single monitor on Windows using GDI+ via
     /// <c>System.Drawing</c> interop (available on .NET 10 Windows).
-    /// The image is downscaled to a max dimension of 1280px and
-    /// encoded as JPEG to keep the base64 payload under API limits.
+    /// The image is encoded as lossless PNG at native resolution to
+    /// preserve full detail on high-DPI (4K/8K) displays.
     /// </summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
     private static byte[] CaptureWindowsDisplay(int displayIndex)
@@ -1521,7 +1527,7 @@ IConfiguration configuration)
             g.CopyFromScreen(bounds.X, bounds.Y, 0, 0, bounds.Size);
         }
 
-        return DownscaleAndEncodeJpeg(bitmap);
+        return EncodePng(bitmap);
     }
 
     /// <summary>
@@ -1544,7 +1550,7 @@ IConfiguration configuration)
         }
 
         DrawClickMarker(bitmap, clickX, clickY);
-        return DownscaleAndEncodeJpeg(bitmap);
+        return EncodePng(bitmap);
     }
 
     /// <summary>
@@ -1606,59 +1612,15 @@ IConfiguration configuration)
     }
 
     /// <summary>
-    /// Returns the scale factor applied when downscaling a display's
-    /// screenshot to <see cref="ScreenshotMaxDimension"/>.  Model-provided
-    /// coordinates (in screenshot space) should be divided by this factor
-    /// to convert back to display-relative coordinates.
-    /// </summary>
-    private static double GetScreenshotScaleFactor(System.Drawing.Rectangle displayBounds)
-    {
-        return Math.Min(1.0,
-            (double)ScreenshotMaxDimension / Math.Max(displayBounds.Width, displayBounds.Height));
-    }
-
-    private const int ScreenshotMaxDimension = 1280;
-
-    /// <summary>
-    /// Downscales a bitmap to a max dimension of <see cref="ScreenshotMaxDimension"/>px
-    /// and encodes it as JPEG (quality 80) to keep the base64 payload under API limits.
+    /// Encodes a bitmap as lossless PNG at native resolution.
+    /// Preserves full detail on high-DPI (4K/8K) displays.
     /// </summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    private static byte[] DownscaleAndEncodeJpeg(System.Drawing.Bitmap bitmap)
+    private static byte[] EncodePng(System.Drawing.Bitmap bitmap)
     {
-        var scale = Math.Min(1.0,
-            (double)ScreenshotMaxDimension / Math.Max(bitmap.Width, bitmap.Height));
-
-        System.Drawing.Bitmap toEncode;
-        if (scale < 1.0)
-        {
-            var newW = (int)(bitmap.Width * scale);
-            var newH = (int)(bitmap.Height * scale);
-            toEncode = new System.Drawing.Bitmap(bitmap, newW, newH);
-        }
-        else
-        {
-            toEncode = bitmap;
-        }
-
-        try
-        {
-            using var ms = new System.IO.MemoryStream();
-            var jpegEncoder = System.Drawing.Imaging.ImageCodecInfo.GetImageEncoders()
-                .First(e => e.FormatID == System.Drawing.Imaging.ImageFormat.Jpeg.Guid);
-            var encoderParams = new System.Drawing.Imaging.EncoderParameters(1)
-            {
-                Param = [new System.Drawing.Imaging.EncoderParameter(
-                    System.Drawing.Imaging.Encoder.Quality, 80L)]
-            };
-            toEncode.Save(ms, jpegEncoder, encoderParams);
-            return ms.ToArray();
-        }
-        finally
-        {
-            if (!ReferenceEquals(toEncode, bitmap))
-                toEncode.Dispose();
-        }
+        using var ms = new System.IO.MemoryStream();
+        bitmap.Save(ms, System.Drawing.Imaging.ImageFormat.Png);
+        return ms.ToArray();
     }
 
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
@@ -1759,18 +1721,16 @@ IConfiguration configuration)
         var button = (payload.Button ?? "left").ToLowerInvariant();
         var clickType = (payload.ClickType ?? "single").ToLowerInvariant();
 
-        // Model coordinates are in screenshot (downscaled) space.
-        // Scale back to display-relative coordinates before clicking.
+        // Coordinates are in native display-relative space (no scaling).
         var bounds = GetDisplayBounds(device.DisplayIndex);
-        var scale = GetScreenshotScaleFactor(bounds);
-        var displayX = (int)Math.Round(payload.X / scale);
-        var displayY = (int)Math.Round(payload.Y / scale);
+        var displayX = payload.X;
+        var displayY = payload.Y;
 
         // Translate display-relative → absolute virtual screen coords
         var absX = bounds.X + displayX;
         var absY = bounds.Y + displayY;
 
-        AddLog(job, $"Click {button} {clickType} at screenshot ({payload.X},{payload.Y}) → display ({displayX},{displayY}) on '{device.Name}' → abs ({absX},{absY})");
+        AddLog(job, $"Click {button} {clickType} at ({displayX},{displayY}) on '{device.Name}' → abs ({absX},{absY})");
         await db.SaveChangesAsync(ct);
 
         PerformClick(absX, absY, button, clickType);
@@ -1808,18 +1768,16 @@ IConfiguration configuration)
             throw new InvalidOperationException("TypeOnDesktop requires a 'text' field.");
 
         // If coordinates given, click to focus first.
-        // Model coordinates are in screenshot (downscaled) space — scale
-        // back to display-relative coordinates before clicking.
+        // Coordinates are in native display-relative space (no scaling).
         if (payload.X.HasValue && payload.Y.HasValue)
         {
             var bounds = GetDisplayBounds(device.DisplayIndex);
-            var scale = GetScreenshotScaleFactor(bounds);
-            var displayX = (int)Math.Round(payload.X.Value / scale);
-            var displayY = (int)Math.Round(payload.Y.Value / scale);
+            var displayX = payload.X.Value;
+            var displayY = payload.Y.Value;
             var absX = bounds.X + displayX;
             var absY = bounds.Y + displayY;
 
-            AddLog(job, $"Click to focus at screenshot ({payload.X},{payload.Y}) → display ({displayX},{displayY}) on '{device.Name}' → abs ({absX},{absY})");
+            AddLog(job, $"Click to focus at ({displayX},{displayY}) on '{device.Name}' → abs ({absX},{absY})");
             PerformClick(absX, absY, "left", "single");
             await Task.Delay(100, ct); // Brief pause for focus
         }

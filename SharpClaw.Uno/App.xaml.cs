@@ -114,10 +114,12 @@ public partial class App : Application
                     var isDev = context.HostingEnvironment.IsDevelopment();
                     var apiUrl = LocalEnvironment.LoadApiUrl(isDev);
                     var backendEnabled = LocalEnvironment.LoadBackendEnabled(isDev);
+                    var persistent = LocalEnvironment.LoadProcessesPersistent(isDev);
 
                     var backendManager = new BackendProcessManager(apiUrl)
                     {
-                        SkipLaunch = !backendEnabled
+                        SkipLaunch = !backendEnabled,
+                        Persistent = persistent,
                     };
                     services.AddSingleton(backendManager);
 
@@ -126,7 +128,8 @@ public partial class App : Application
 
                     var gatewayManager = new GatewayProcessManager(gatewayUrl)
                     {
-                        SkipLaunch = !gatewayEnabled
+                        SkipLaunch = !gatewayEnabled,
+                        Persistent = persistent,
                     };
                     services.AddSingleton(gatewayManager);
 
@@ -155,13 +158,23 @@ public partial class App : Application
                 await navigator.NavigateRouteAsync(this, "Boot", qualifier: Qualifiers.Nested);
             });
 
-        // Stop managed processes when the app window closes.
+        // Dispose managed processes when the app window closes.
+        // Persistent mode → Detach (keep running); otherwise → Stop + Kill.
         if (MainWindow is not null)
         {
             MainWindow.Closed += (_, _) =>
             {
-                Host?.Services.GetService<GatewayProcessManager>()?.Dispose();
-                Host?.Services.GetService<BackendProcessManager>()?.Dispose();
+                var gw = Host?.Services.GetService<GatewayProcessManager>();
+                var be = Host?.Services.GetService<BackendProcessManager>();
+
+                // Refresh auto-start scripts so paths stay current
+                // (handles MSIX version-path changes on update).
+                WindowsStartupManager.RefreshIfNeeded(
+                    be?.ExecutablePath, be?.ApiUrl,
+                    gw?.ExecutablePath, gw?.GatewayUrl);
+
+                gw?.Dispose();
+                be?.Dispose();
             };
         }
     }
@@ -176,6 +189,7 @@ public partial class App : Application
             new ViewMap<MainPage>(),
             new ViewMap<SettingsPage>(),
             new ViewMap<LegalNoticesPage>(),
+            new ViewMap<UserGuidePage>(),
             new ViewMap<EnvMenuPage>(),
             new ViewMap<EnvEditorPage>()
         );
@@ -190,6 +204,7 @@ public partial class App : Application
                     new ("Main", View: views.FindByView<MainPage>(), IsDefault:true),
                     new ("Settings", View: views.FindByView<SettingsPage>()),
                     new ("LegalNotices", View: views.FindByView<LegalNoticesPage>()),
+                    new ("UserGuide", View: views.FindByView<UserGuidePage>()),
                     new ("EnvMenu", View: views.FindByView<EnvMenuPage>()),
                     new ("EnvEditor", View: views.FindByView<EnvEditorPage>())
                 ]
