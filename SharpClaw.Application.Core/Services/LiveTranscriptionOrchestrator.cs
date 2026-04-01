@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Diagnostics;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging;
@@ -151,15 +152,25 @@ public sealed class LiveTranscriptionOrchestrator(
         var effectiveLanguage = language;
         var tickCount = 0;
 
-        var effectiveWindow = Clamp(windowSecondsOverride, 5, BufferCapacitySeconds, WindowSeconds);
+        var effectiveWindow = mode == TranscriptionMode.StrictStep
+            ? Clamp(windowSecondsOverride, 2, BufferCapacitySeconds, InferenceIntervalSeconds)
+            : Clamp(windowSecondsOverride, 5, BufferCapacitySeconds, WindowSeconds);
         var effectiveStep = mode == TranscriptionMode.SlidingWindow
             ? Clamp(stepSecondsOverride, 1, effectiveWindow, InferenceIntervalSeconds)
             : effectiveWindow;
         var isTwoPass = mode == TranscriptionMode.SlidingWindow;
 
+        // Poll cadence is always short (2 s) so the loop reacts
+        // quickly to new audio.  For modes where step == window
+        // (StrictStep, StrictWindow), inference only fires once
+        // a full window of new samples has accumulated.
+        var pollSeconds = InferenceIntervalSeconds;
+        var samplesPerWindow = (long)effectiveWindow * SampleRate;
+        var lastInferenceSample = ringBuffer.TotalWritten;
+
         logger.LogInformation(
-            "Job {JobId}: mode={Mode}, window={Window}s, step={Step}s",
-            jobId, mode, effectiveWindow, effectiveStep);
+            "Job {JobId}: mode={Mode}, window={Window}s, step={Step}s, poll={Poll}s",
+            jobId, mode, effectiveWindow, effectiveStep, pollSeconds);
 
         try
         {
@@ -200,9 +211,13 @@ public sealed class LiveTranscriptionOrchestrator(
             var noDataTicks = 0;
             const int maxNoDataTicks = 10;
 
+            var pollInterval = TimeSpan.FromSeconds(pollSeconds);
+            var nextPollDelay = pollInterval;
+
             while (!ct.IsCancellationRequested)
             {
-                await Task.Delay(TimeSpan.FromSeconds(effectiveStep), ct);
+                await Task.Delay(nextPollDelay, ct);
+                nextPollDelay = pollInterval;
 
                 // ── Data-flow watchdog ────────────────────────────
                 // Detect when the audio capture has stalled or the
@@ -222,10 +237,10 @@ public sealed class LiveTranscriptionOrchestrator(
                     if (noDataTicks >= maxNoDataTicks)
                     {
                         await AddJobLogAsync(jobId,
-                            $"No new audio data for {noDataTicks * effectiveStep}s — capture may have stalled.",
+                            $"No new audio data for {noDataTicks * pollSeconds}s — capture may have stalled.",
                             "Error");
                         throw new InvalidOperationException(
-                            $"No new audio data received for {noDataTicks * effectiveStep} seconds. " +
+                            $"No new audio data received for {noDataTicks * pollSeconds} seconds. " +
                             "Audio capture may have stalled or the device was disconnected.");
                     }
 
@@ -236,6 +251,15 @@ public sealed class LiveTranscriptionOrchestrator(
                 }
                 noDataTicks = 0;
                 lastDataWritten = currentWritten;
+
+                // ── Accumulation gate ─────────────────────────────
+                // For modes where step == window, wait until a full
+                // window of new audio has been captured before firing
+                // inference.  SlidingWindow already uses a short step
+                // so it fires every poll tick.
+                if (!isTwoPass
+                    && currentWritten - lastInferenceSample < samplesPerWindow)
+                    continue;
 
                 try
                 {
@@ -267,6 +291,10 @@ public sealed class LiveTranscriptionOrchestrator(
                     var rms = ComputeRms(windowSamples);
                     if (rms < 0.005)
                     {
+                        // Advance the accumulation cursor so non-two-pass
+                        // modes don't re-check the same silent window
+                        // every poll tick.
+                        lastInferenceSample = currentWritten;
                         await AddJobLogAsync(jobId,
                             $"[tick {tickCount}] silence gate: RMS={rms:F6}, skipping", "Trace");
                         continue;
@@ -283,11 +311,23 @@ public sealed class LiveTranscriptionOrchestrator(
 
                     using var httpClient = httpClientFactory.CreateClient();
 
+                    var inferenceStart = Stopwatch.GetTimestamp();
+
                     var result = await sttClient.TranscribeAsync(
                         httpClient, apiKey, modelName, wavBytes,
                         effectiveLanguage, promptBuffer, ct);
 
                     consecutiveErrors = 0;
+                    lastInferenceSample = currentWritten;
+
+                    // Compensate next poll delay for time spent in
+                    // inference so total tick cadence stays close to
+                    // pollSeconds rather than pollSeconds + inference.
+                    var inferenceElapsed = Stopwatch.GetElapsedTime(inferenceStart);
+                    var compensated = pollInterval - inferenceElapsed;
+                    nextPollDelay = compensated > TimeSpan.FromMilliseconds(100)
+                        ? compensated
+                        : TimeSpan.Zero;
 
                     if (effectiveLanguage is null
                         && !string.IsNullOrWhiteSpace(result.Language))
