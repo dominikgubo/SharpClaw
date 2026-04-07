@@ -110,10 +110,12 @@ Minimax, Custom, Local
 
 | Category | Values |
 |----------|--------|
-| Global flags | `CreateSubAgent`, `CreateContainer`, `RegisterInfoStore`, `AccessLocalhostInBrowser`, `AccessLocalhostCli`, `ClickDesktop`, `TypeOnDesktop`, `ReadCrossThreadHistory` |
-| Per-resource | `UnsafeExecuteAsDangerousShell`, `ExecuteAsSafeShell`, `AccessLocalInfoStore`, `AccessExternalInfoStore`, `AccessWebsite`, `QuerySearchEngine`, `AccessContainer`, `ManageAgent`, `EditTask`, `AccessSkill`, `CaptureDisplay` |
+| Global flags | `CreateSubAgent`, `CreateContainer`, `RegisterInfoStore`, `AccessLocalhostInBrowser`, `AccessLocalhostCli`, `ClickDesktop`, `TypeOnDesktop`, `ReadCrossThreadHistory`, `CreateDocumentSession`, `EnumerateWindows`, `FocusWindow`, `CloseWindow`, `ResizeWindow`, `SendHotkey`, `ReadClipboard`, `WriteClipboard` |
+| Per-resource | `UnsafeExecuteAsDangerousShell`, `ExecuteAsSafeShell`, `AccessLocalInfoStore`, `AccessExternalInfoStore`, `AccessWebsite`, `QuerySearchEngine`, `AccessContainer`, `ManageAgent`, `EditTask`, `AccessSkill`, `CaptureDisplay`, `CaptureWindow`, `StopProcess` |
 | Transcription | `TranscribeFromAudioDevice`, `TranscribeFromAudioStream`, `TranscribeFromAudioFile` |
 | Editor | `EditorReadFile`, `EditorGetOpenFiles`, `EditorGetSelection`, `EditorGetDiagnostics`, `EditorApplyEdit`, `EditorCreateFile`, `EditorDeleteFile`, `EditorShowDiff`, `EditorRunBuild`, `EditorRunTerminal` |
+| Document | `SpreadsheetReadRange`, `SpreadsheetWriteRange`, `SpreadsheetListSheets`, `SpreadsheetCreateSheet`, `SpreadsheetDeleteSheet`, `SpreadsheetGetInfo`, `SpreadsheetCreateWorkbook`, `SpreadsheetLiveReadRange`, `SpreadsheetLiveWriteRange` |
+| Desktop awareness | `LaunchNativeApplication` |
 
 ### PermissionClearance
 
@@ -188,6 +190,16 @@ VisualStudio2026, VisualStudioCode, Other
 Pending, Downloading, Ready, Failed
 ```
 
+### DocumentType
+
+```
+Spreadsheet = 0, Csv = 1, Document = 2, Presentation = 3
+```
+
+Inferred from the file extension when a document session is created.
+`.xlsx`/`.xlsm` → `Spreadsheet`, `.csv` → `Csv`, `.docx` → `Document`,
+`.pptx` → `Presentation`.
+
 ### ChatStreamEventType
 
 | Value | Description |
@@ -205,8 +217,7 @@ Pending, Downloading, Ready, Failed
 | Value | Int | Description |
 |-------|-----|-------------|
 | `SlidingWindow` | 0 | Two-pass sliding window. Segments are emitted provisionally as soon as they pass quality filters, then finalized (or retracted) once the commit delay confirms them. Consumers see text within one inference tick (~3 s) and receive an update when the segment is confirmed. **Default.** |
-| `StrictStep` | 1 | Sequential non-overlapping short chunks (default 2 s). Each chunk transcribed independently, segments emitted immediately. Lowest perceived latency, minimal API cost, no cross-window dedup. Prompt conditioning still provides linguistic continuity. |
-| `StrictWindow` | 2 | Non-overlapping sequential windows (default 10 s). Each window of audio is transcribed exactly once — one API call per window. Cross-window continuity via prompt conditioning. Full dedup pipeline runs as a safety net. Minimal token cost; perceived latency equals the window length. |
+| `StrictWindow` | 2 | Non-overlapping sequential windows (default 10 s). Each window of audio is transcribed exactly once — one API call per window. Cross-window continuity via prompt conditioning. Full dedup pipeline runs as a safety net. Minimal token cost; perceived latency equals the window length. Use `windowSeconds` to control the window size (clamped to [5, 15]). |
 
 ### TaskInstanceStatus
 
@@ -1225,7 +1236,7 @@ Clear a single default resource by key.
 
 Valid keys: `dangshell`, `safeshell`, `container`, `website`, `search`,
 `localinfo`, `externalinfo`, `audiodevice`, `displaydevice`, `agent`,
-`task`, `skill`, `transcriptionmodel`, `editor`.
+`task`, `skill`, `transcriptionmodel`, `editor`, `document`, `nativeapp`.
 
 ### ContextResponse
 
@@ -1412,7 +1423,7 @@ Clear a single default resource by key.
 
 Valid keys: `dangshell`, `safeshell`, `container`, `website`, `search`,
 `localinfo`, `externalinfo`, `audiodevice`, `displaydevice`, `agent`,
-`task`, `skill`, `transcriptionmodel`, `editor`.
+`task`, `skill`, `transcriptionmodel`, `editor`, `document`, `nativeapp`.
 
 ### ChannelResponse
 
@@ -1751,7 +1762,7 @@ unless overridden via `agentId`.
   "workingDirectory": "string | null",
   "transcriptionModelId": "guid | null",
   "language": "string | null",
-  "transcriptionMode": "SlidingWindow | StrictStep | StrictWindow | null",
+  "transcriptionMode": "SlidingWindow | StrictWindow | null",
   "windowSeconds": "int | null",
   "stepSeconds": "int | null"
 }
@@ -1802,22 +1813,21 @@ For transcription jobs (`TranscribeFromAudioDevice`,
 - **`transcriptionMode`** — pipeline mode. `SlidingWindow` (default):
   two-pass — segments are emitted provisionally within one inference
   tick, then finalized or retracted once the commit delay confirms
-  them.  `StrictStep`: sequential non-overlapping short chunks (default
-  2 s), segments emitted immediately — lowest latency.  `StrictWindow`:
-  non-overlapping sequential windows (default 10 s) — each window
-  transcribed exactly once with minimal token cost.
+  them.  `StrictWindow`: non-overlapping sequential windows (default
+  10 s) — each window transcribed exactly once with minimal token cost.
+  Whisper needs a full window of audio context to produce accurate
+  results, so perceived latency equals the window length.
 - **`windowSeconds`** — seconds of audio sent to Whisper per inference
-  tick. Clamped to [5, 15] for SlidingWindow/StrictWindow, [2, 15] for
-  StrictStep. Default 10 (SlidingWindow/StrictWindow) or 2 (StrictStep).
-  Larger windows give more context but cost more per API call.
+  tick. Clamped to [5, 15]. Default 10. Larger windows give more
+  context but cost more per API call.
 - **`stepSeconds`** — seconds between inference ticks (SlidingWindow
-  mode only). Clamped to [1, window]. Default 2. Ignored in StrictStep
-  and StrictWindow modes where step equals window.
+  mode only). Clamped to [1, window]. Default 2. Ignored in
+  StrictWindow mode where step equals window.
 
 > **CLI equivalent:**
-> `job submit <channelId> TranscribeFromAudioDevice <audioDeviceId> --model <id> --lang en --mode step --window 12`
+> `job submit <channelId> TranscribeFromAudioDevice <audioDeviceId> --model <id> --lang en --mode window --window 12`
 >
-> Mode shortcuts: `sliding` (default, two-pass), `step` (short chunks), `window` (full windows).
+> Mode shortcuts: `sliding` (default, two-pass), `window` (sequential windows).
 
 Audio is automatically normalised to mono 16 kHz 16-bit PCM before
 being sent to the transcription model (Whisper-optimal format).
@@ -1999,10 +2009,7 @@ Retrieve transcription segments added after the given timestamp.
   "workingDirectory": "string | null",
   "transcriptionModelId": "guid | null",
   "language": "string | null",
-  "transcriptionMode": "SlidingWindow | StrictStep | StrictWindow | null",
-  "windowSeconds": "int | null",
-  "stepSeconds": "int | null",
-  "segments": [
+  "transcriptionMode": "SlidingWindow | StrictWindow | null",
     {
       "id": "guid",
       "text": "string",
@@ -2051,7 +2058,7 @@ lifecycle:
    `isProvisional: false`. Consumers should remove it.
 
 In `StrictWindow` mode all segments are final on first emission
-(`isProvisional` is always `false`). In `StrictStep` mode the same applies.
+(`isProvisional` is always `false`).
 
 #### Deduplication pipeline (non-timestamped API responses)
 
@@ -2295,6 +2302,105 @@ DELETE /resources/editorsessions/{id}
 }
 ```
 
+### Document sessions
+
+Document sessions register a file path for spreadsheet / CSV / document
+manipulation by agents. The `documentType` is inferred from the file
+extension.
+
+```
+POST   /resources/documentsessions
+GET    /resources/documentsessions
+GET    /resources/documentsessions/{id}
+PUT    /resources/documentsessions/{id}
+DELETE /resources/documentsessions/{id}
+```
+
+**CreateDocumentSessionRequest:**
+
+```json
+{
+  "filePath": "string",
+  "name": "string | null",
+  "description": "string | null"
+}
+```
+
+`filePath` is required and must point to an existing file. The
+`documentType` is inferred automatically from the extension.
+
+**UpdateDocumentSessionRequest:**
+
+```json
+{
+  "name": "string | null",
+  "description": "string | null"
+}
+```
+
+**DocumentSessionResponse:**
+
+```json
+{
+  "id": "guid",
+  "name": "string",
+  "filePath": "string",
+  "documentType": "Spreadsheet | Csv | Document | Presentation",
+  "description": "string | null",
+  "createdAt": "datetime",
+  "updatedAt": "datetime"
+}
+```
+
+### Native applications
+
+Native applications register executables that agents can launch. An
+optional `alias` provides a short friendly name for CLI use.
+
+```
+POST   /resources/nativeapplications
+GET    /resources/nativeapplications
+GET    /resources/nativeapplications/{id}
+PUT    /resources/nativeapplications/{id}
+DELETE /resources/nativeapplications/{id}
+```
+
+**CreateNativeApplicationRequest:**
+
+```json
+{
+  "name": "string",
+  "executablePath": "string",
+  "alias": "string | null",
+  "description": "string | null"
+}
+```
+
+**UpdateNativeApplicationRequest:**
+
+```json
+{
+  "name": "string | null",
+  "executablePath": "string | null",
+  "alias": "string | null",
+  "description": "string | null"
+}
+```
+
+**NativeApplicationResponse:**
+
+```json
+{
+  "id": "guid",
+  "name": "string",
+  "executablePath": "string",
+  "alias": "string | null",
+  "description": "string | null",
+  "createdAt": "datetime",
+  "updatedAt": "datetime"
+}
+```
+
 ### Resource lookup
 
 #### GET /resources/lookup/{type}
@@ -2320,6 +2426,8 @@ matches the JSON property names used in the permissions API.
 | `agentAccesses` | Agents |
 | `taskAccesses` | ScheduledTasks |
 | `skillAccesses` | Skills |
+| `documentSessionAccesses` | DocumentSessions |
+| `nativeApplicationAccesses` | NativeApplications |
 
 **Response `200`:**
 
@@ -2380,6 +2488,22 @@ don't have.
   "canReadCrossThreadHistory": false,
   "canEditAgentHeader": false,
   "canEditChannelHeader": false,
+  "canCreateDocumentSessions": false,
+  "createDocumentSessionsClearance": "Unset",
+  "canEnumerateWindows": false,
+  "enumerateWindowsClearance": "Unset",
+  "canFocusWindow": false,
+  "focusWindowClearance": "Unset",
+  "canCloseWindow": false,
+  "closeWindowClearance": "Unset",
+  "canResizeWindow": false,
+  "resizeWindowClearance": "Unset",
+  "canSendHotkey": false,
+  "sendHotkeyClearance": "Unset",
+  "canReadClipboard": false,
+  "readClipboardClearance": "Unset",
+  "canWriteClipboard": false,
+  "writeClipboardClearance": "Unset",
   "dangerousShellAccesses": [{ "resourceId": "guid", "clearance": "Independent" }],
   "safeShellAccesses": [{ "resourceId": "guid", "clearance": "Independent" }],
   "containerAccesses": null,
@@ -2392,7 +2516,9 @@ don't have.
   "taskAccesses": null,
   "skillAccesses": null,
   "agentHeaderAccesses": null,
-  "channelHeaderAccesses": null
+  "channelHeaderAccesses": null,
+  "documentSessionAccesses": null,
+  "nativeApplicationAccesses": null
 }
 ```
 
@@ -2436,6 +2562,22 @@ wildcard grant that covers all resources of that type.
   "canReadCrossThreadHistory": false,
   "canEditAgentHeader": false,
   "canEditChannelHeader": false,
+  "canCreateDocumentSessions": false,
+  "createDocumentSessionsClearance": "Unset",
+  "canEnumerateWindows": false,
+  "enumerateWindowsClearance": "Unset",
+  "canFocusWindow": false,
+  "focusWindowClearance": "Unset",
+  "canCloseWindow": false,
+  "closeWindowClearance": "Unset",
+  "canResizeWindow": false,
+  "resizeWindowClearance": "Unset",
+  "canSendHotkey": false,
+  "sendHotkeyClearance": "Unset",
+  "canReadClipboard": false,
+  "readClipboardClearance": "Unset",
+  "canWriteClipboard": false,
+  "writeClipboardClearance": "Unset",
   "dangerousShellAccesses": [{ "resourceId": "guid", "clearance": "Independent" }],
   "safeShellAccesses": [],
   "containerAccesses": [],
@@ -2448,7 +2590,9 @@ wildcard grant that covers all resources of that type.
   "taskAccesses": [],
   "skillAccesses": [],
   "agentHeaderAccesses": [],
-  "channelHeaderAccesses": []
+  "channelHeaderAccesses": [],
+  "documentSessionAccesses": [],
+  "nativeApplicationAccesses": []
 }
 ```
 
@@ -2497,7 +2641,9 @@ channel and context level. Resolution order: channel → context.
   "taskResourceId": "guid | null",
   "skillResourceId": "guid | null",
   "transcriptionModelId": "guid | null",
-  "editorSessionResourceId": "guid | null"
+  "editorSessionResourceId": "guid | null",
+  "documentSessionResourceId": "guid | null",
+  "nativeApplicationResourceId": "guid | null"
 }
 ```
 

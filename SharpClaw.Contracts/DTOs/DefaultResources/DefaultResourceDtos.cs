@@ -11,15 +11,17 @@ public sealed record SetDefaultResourcesRequest(
     Guid? ContainerResourceId = null,
     Guid? WebsiteResourceId = null,
     Guid? SearchEngineResourceId = null,
-    Guid? LocalInfoStoreResourceId = null,
-    Guid? ExternalInfoStoreResourceId = null,
+    Guid? InternalDatabaseResourceId = null,
+    Guid? ExternalDatabaseResourceId = null,
     Guid? AudioDeviceResourceId = null,
     Guid? DisplayDeviceResourceId = null,
     Guid? AgentResourceId = null,
     Guid? TaskResourceId = null,
     Guid? SkillResourceId = null,
     Guid? TranscriptionModelId = null,
-    Guid? EditorSessionResourceId = null);
+    Guid? EditorSessionResourceId = null,
+    Guid? DocumentSessionResourceId = null,
+    Guid? NativeApplicationResourceId = null);
 
 public sealed record DefaultResourcesResponse(
     Guid Id,
@@ -28,15 +30,17 @@ public sealed record DefaultResourcesResponse(
     Guid? ContainerResourceId,
     Guid? WebsiteResourceId,
     Guid? SearchEngineResourceId,
-    Guid? LocalInfoStoreResourceId,
-    Guid? ExternalInfoStoreResourceId,
+    Guid? InternalDatabaseResourceId,
+    Guid? ExternalDatabaseResourceId,
     Guid? AudioDeviceResourceId,
     Guid? DisplayDeviceResourceId,
     Guid? AgentResourceId,
     Guid? TaskResourceId,
     Guid? SkillResourceId,
     Guid? TranscriptionModelId,
-    Guid? EditorSessionResourceId);
+    Guid? EditorSessionResourceId,
+    Guid? DocumentSessionResourceId,
+    Guid? NativeApplicationResourceId);
 
 /// <summary>
 /// Sets a single default resource by key.

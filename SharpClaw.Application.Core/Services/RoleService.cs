@@ -115,8 +115,8 @@ public sealed class RoleService(SharpClawDbContext db)
             ps.ContainerAccesses.Clear();
             ps.WebsiteAccesses.Clear();
             ps.SearchEngineAccesses.Clear();
-            ps.LocalInfoStorePermissions.Clear();
-            ps.ExternalInfoStorePermissions.Clear();
+            ps.InternalDatabaseAccesses.Clear();
+            ps.ExternalDatabaseAccesses.Clear();
             ps.AudioDeviceAccesses.Clear();
             ps.DisplayDeviceAccesses.Clear();
             ps.EditorSessionAccesses.Clear();
@@ -125,6 +125,8 @@ public sealed class RoleService(SharpClawDbContext db)
             ps.SkillPermissions.Clear();
             ps.AgentHeaderAccesses.Clear();
             ps.ChannelHeaderAccesses.Clear();
+            ps.DocumentSessionAccesses.Clear();
+            ps.NativeApplicationAccesses.Clear();
         }
         else
         {
@@ -140,8 +142,8 @@ public sealed class RoleService(SharpClawDbContext db)
         ps.CreateSubAgentsClearance = request.CreateSubAgentsClearance;
         ps.CanCreateContainers = request.CanCreateContainers;
         ps.CreateContainersClearance = request.CreateContainersClearance;
-        ps.CanRegisterInfoStores = request.CanRegisterInfoStores;
-        ps.RegisterInfoStoresClearance = request.RegisterInfoStoresClearance;
+        ps.CanRegisterDatabases = request.CanRegisterDatabases;
+        ps.RegisterDatabasesClearance = request.RegisterDatabasesClearance;
         ps.CanAccessLocalhostInBrowser = request.CanAccessLocalhostInBrowser;
         ps.AccessLocalhostInBrowserClearance = request.AccessLocalhostInBrowserClearance;
         ps.CanAccessLocalhostCli = request.CanAccessLocalhostCli;
@@ -156,6 +158,22 @@ public sealed class RoleService(SharpClawDbContext db)
         ps.EditAgentHeaderClearance = request.EditAgentHeaderClearance;
         ps.CanEditChannelHeader = request.CanEditChannelHeader;
         ps.EditChannelHeaderClearance = request.EditChannelHeaderClearance;
+        ps.CanCreateDocumentSessions = request.CanCreateDocumentSessions;
+        ps.CreateDocumentSessionsClearance = request.CreateDocumentSessionsClearance;
+        ps.CanEnumerateWindows = request.CanEnumerateWindows;
+        ps.EnumerateWindowsClearance = request.EnumerateWindowsClearance;
+        ps.CanFocusWindow = request.CanFocusWindow;
+        ps.FocusWindowClearance = request.FocusWindowClearance;
+        ps.CanCloseWindow = request.CanCloseWindow;
+        ps.CloseWindowClearance = request.CloseWindowClearance;
+        ps.CanResizeWindow = request.CanResizeWindow;
+        ps.ResizeWindowClearance = request.ResizeWindowClearance;
+        ps.CanSendHotkey = request.CanSendHotkey;
+        ps.SendHotkeyClearance = request.SendHotkeyClearance;
+        ps.CanReadClipboard = request.CanReadClipboard;
+        ps.ReadClipboardClearance = request.ReadClipboardClearance;
+        ps.CanWriteClipboard = request.CanWriteClipboard;
+        ps.WriteClipboardClearance = request.WriteClipboardClearance;
 
         // Apply per-resource grants.
         AddGrants(ps.DangerousShellAccesses, request.DangerousShellAccesses,
@@ -178,13 +196,13 @@ public sealed class RoleService(SharpClawDbContext db)
             (g, psId) => new SearchEngineAccessDB
             { PermissionSetId = psId, SearchEngineId = g.ResourceId, Clearance = g.Clearance });
 
-        AddGrants(ps.LocalInfoStorePermissions, request.LocalInfoStoreAccesses,
-            (g, psId) => new LocalInfoStoreAccessDB
-            { PermissionSetId = psId, LocalInformationStoreId = g.ResourceId, Clearance = g.Clearance });
+        AddGrants(ps.InternalDatabaseAccesses, request.InternalDatabaseAccesses,
+            (g, psId) => new InternalDatabaseAccessDB
+            { PermissionSetId = psId, InternalDatabaseId = g.ResourceId, Clearance = g.Clearance });
 
-        AddGrants(ps.ExternalInfoStorePermissions, request.ExternalInfoStoreAccesses,
-            (g, psId) => new ExternalInfoStoreAccessDB
-            { PermissionSetId = psId, ExternalInformationStoreId = g.ResourceId, Clearance = g.Clearance });
+        AddGrants(ps.ExternalDatabaseAccesses, request.ExternalDatabaseAccesses,
+            (g, psId) => new ExternalDatabaseAccessDB
+            { PermissionSetId = psId, ExternalDatabaseId = g.ResourceId, Clearance = g.Clearance });
 
         AddGrants(ps.AudioDeviceAccesses, request.AudioDeviceAccesses,
             (g, psId) => new AudioDeviceAccessDB
@@ -218,6 +236,14 @@ public sealed class RoleService(SharpClawDbContext db)
             (g, psId) => new ChannelHeaderAccessDB
             { PermissionSetId = psId, ChannelId = g.ResourceId, Clearance = g.Clearance });
 
+        AddGrants(ps.DocumentSessionAccesses, request.DocumentSessionAccesses,
+            (g, psId) => new DocumentSessionAccessDB
+            { PermissionSetId = psId, DocumentSessionId = g.ResourceId, Clearance = g.Clearance });
+
+        AddGrants(ps.NativeApplicationAccesses, request.NativeApplicationAccesses,
+            (g, psId) => new NativeApplicationAccessDB
+            { PermissionSetId = psId, NativeApplicationId = g.ResourceId, Clearance = g.Clearance });
+
         await db.SaveChangesAsync(ct);
 
         return ToResponse(role, ps);
@@ -236,14 +262,22 @@ public sealed class RoleService(SharpClawDbContext db)
                 {
                     CanCreateSubAgents: false,
                     CanCreateContainers: false,
-                    CanRegisterInfoStores: false,
+                    CanRegisterDatabases: false,
                     CanAccessLocalhostInBrowser: false,
                     CanAccessLocalhostCli: false,
                     CanClickDesktop: false,
                     CanTypeOnDesktop: false,
                     CanReadCrossThreadHistory: false,
                     CanEditAgentHeader: false,
-                    CanEditChannelHeader: false
+                    CanEditChannelHeader: false,
+                    CanCreateDocumentSessions: false,
+                    CanEnumerateWindows: false,
+                    CanFocusWindow: false,
+                    CanCloseWindow: false,
+                    CanResizeWindow: false,
+                    CanSendHotkey: false,
+                    CanReadClipboard: false,
+                    CanWriteClipboard: false
                 })
                 return;
 
@@ -259,9 +293,9 @@ public sealed class RoleService(SharpClawDbContext db)
             throw new UnauthorizedAccessException(
                 "Cannot grant CanCreateContainers — you do not hold this permission.");
 
-        if (request.CanRegisterInfoStores && !callerPs.CanRegisterInfoStores)
+        if (request.CanRegisterDatabases && !callerPs.CanRegisterDatabases)
             throw new UnauthorizedAccessException(
-                "Cannot grant CanRegisterInfoStores — you do not hold this permission.");
+                "Cannot grant CanRegisterDatabases — you do not hold this permission.");
 
         if (request.CanAccessLocalhostInBrowser && !callerPs.CanAccessLocalhostInBrowser)
             throw new UnauthorizedAccessException(
@@ -290,6 +324,38 @@ public sealed class RoleService(SharpClawDbContext db)
         if (request.CanEditChannelHeader && !callerPs.CanEditChannelHeader)
             throw new UnauthorizedAccessException(
                 "Cannot grant CanEditChannelHeader — you do not hold this permission.");
+
+        if (request.CanCreateDocumentSessions && !callerPs.CanCreateDocumentSessions)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanCreateDocumentSessions — you do not hold this permission.");
+
+        if (request.CanEnumerateWindows && !callerPs.CanEnumerateWindows)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanEnumerateWindows — you do not hold this permission.");
+
+        if (request.CanFocusWindow && !callerPs.CanFocusWindow)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanFocusWindow — you do not hold this permission.");
+
+        if (request.CanCloseWindow && !callerPs.CanCloseWindow)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanCloseWindow — you do not hold this permission.");
+
+        if (request.CanResizeWindow && !callerPs.CanResizeWindow)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanResizeWindow — you do not hold this permission.");
+
+        if (request.CanSendHotkey && !callerPs.CanSendHotkey)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanSendHotkey — you do not hold this permission.");
+
+        if (request.CanReadClipboard && !callerPs.CanReadClipboard)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanReadClipboard — you do not hold this permission.");
+
+        if (request.CanWriteClipboard && !callerPs.CanWriteClipboard)
+            throw new UnauthorizedAccessException(
+                "Cannot grant CanWriteClipboard — you do not hold this permission.");
     }
 
     private static void ValidateResourceGrants(
@@ -305,10 +371,10 @@ public sealed class RoleService(SharpClawDbContext db)
             callerPs?.WebsiteAccesses, a => a.WebsiteId);
         ValidateCollection("SearchEngineAccesses", request.SearchEngineAccesses,
             callerPs?.SearchEngineAccesses, a => a.SearchEngineId);
-        ValidateCollection("LocalInfoStoreAccesses", request.LocalInfoStoreAccesses,
-            callerPs?.LocalInfoStorePermissions, a => a.LocalInformationStoreId);
-        ValidateCollection("ExternalInfoStoreAccesses", request.ExternalInfoStoreAccesses,
-            callerPs?.ExternalInfoStorePermissions, a => a.ExternalInformationStoreId);
+        ValidateCollection("InternalDatabaseAccesses", request.InternalDatabaseAccesses,
+            callerPs?.InternalDatabaseAccesses, a => a.InternalDatabaseId);
+        ValidateCollection("ExternalDatabaseAccesses", request.ExternalDatabaseAccesses,
+            callerPs?.ExternalDatabaseAccesses, a => a.ExternalDatabaseId);
         ValidateCollection("AudioDeviceAccesses", request.AudioDeviceAccesses,
             callerPs?.AudioDeviceAccesses, a => a.AudioDeviceId);
         ValidateCollection("DisplayDeviceAccesses", request.DisplayDeviceAccesses,
@@ -325,6 +391,10 @@ public sealed class RoleService(SharpClawDbContext db)
             callerPs?.AgentHeaderAccesses, a => a.AgentId);
         ValidateCollection("ChannelHeaderAccesses", request.ChannelHeaderAccesses,
             callerPs?.ChannelHeaderAccesses, a => a.ChannelId);
+        ValidateCollection("DocumentSessionAccesses", request.DocumentSessionAccesses,
+            callerPs?.DocumentSessionAccesses, a => a.DocumentSessionId);
+        ValidateCollection("NativeApplicationAccesses", request.NativeApplicationAccesses,
+            callerPs?.NativeApplicationAccesses, a => a.NativeApplicationId);
     }
 
     /// <summary>
@@ -397,8 +467,8 @@ public sealed class RoleService(SharpClawDbContext db)
             .Include(p => p.ContainerAccesses)
             .Include(p => p.WebsiteAccesses)
             .Include(p => p.SearchEngineAccesses)
-            .Include(p => p.LocalInfoStorePermissions)
-            .Include(p => p.ExternalInfoStorePermissions)
+            .Include(p => p.InternalDatabaseAccesses)
+            .Include(p => p.ExternalDatabaseAccesses)
             .Include(p => p.AudioDeviceAccesses)
             .Include(p => p.DisplayDeviceAccesses)
             .Include(p => p.EditorSessionAccesses)
@@ -407,6 +477,8 @@ public sealed class RoleService(SharpClawDbContext db)
             .Include(p => p.SkillPermissions)
             .Include(p => p.AgentHeaderAccesses)
             .Include(p => p.ChannelHeaderAccesses)
+            .Include(p => p.DocumentSessionAccesses)
+            .Include(p => p.NativeApplicationAccesses)
             .AsSplitQuery()
             .FirstOrDefaultAsync(p => p.Id == psId, ct);
     }
@@ -420,8 +492,8 @@ public sealed class RoleService(SharpClawDbContext db)
             CreateSubAgentsClearance: ps?.CreateSubAgentsClearance ?? PermissionClearance.Unset,
             CanCreateContainers: ps?.CanCreateContainers ?? false,
             CreateContainersClearance: ps?.CreateContainersClearance ?? PermissionClearance.Unset,
-            CanRegisterInfoStores: ps?.CanRegisterInfoStores ?? false,
-            RegisterInfoStoresClearance: ps?.RegisterInfoStoresClearance ?? PermissionClearance.Unset,
+            CanRegisterDatabases: ps?.CanRegisterDatabases ?? false,
+            RegisterDatabasesClearance: ps?.RegisterDatabasesClearance ?? PermissionClearance.Unset,
             CanAccessLocalhostInBrowser: ps?.CanAccessLocalhostInBrowser ?? false,
             AccessLocalhostInBrowserClearance: ps?.AccessLocalhostInBrowserClearance ?? PermissionClearance.Unset,
             CanAccessLocalhostCli: ps?.CanAccessLocalhostCli ?? false,
@@ -436,13 +508,29 @@ public sealed class RoleService(SharpClawDbContext db)
             EditAgentHeaderClearance: ps?.EditAgentHeaderClearance ?? PermissionClearance.Unset,
             CanEditChannelHeader: ps?.CanEditChannelHeader ?? false,
             EditChannelHeaderClearance: ps?.EditChannelHeaderClearance ?? PermissionClearance.Unset,
+            CanCreateDocumentSessions: ps?.CanCreateDocumentSessions ?? false,
+            CreateDocumentSessionsClearance: ps?.CreateDocumentSessionsClearance ?? PermissionClearance.Unset,
+            CanEnumerateWindows: ps?.CanEnumerateWindows ?? false,
+            EnumerateWindowsClearance: ps?.EnumerateWindowsClearance ?? PermissionClearance.Unset,
+            CanFocusWindow: ps?.CanFocusWindow ?? false,
+            FocusWindowClearance: ps?.FocusWindowClearance ?? PermissionClearance.Unset,
+            CanCloseWindow: ps?.CanCloseWindow ?? false,
+            CloseWindowClearance: ps?.CloseWindowClearance ?? PermissionClearance.Unset,
+            CanResizeWindow: ps?.CanResizeWindow ?? false,
+            ResizeWindowClearance: ps?.ResizeWindowClearance ?? PermissionClearance.Unset,
+            CanSendHotkey: ps?.CanSendHotkey ?? false,
+            SendHotkeyClearance: ps?.SendHotkeyClearance ?? PermissionClearance.Unset,
+            CanReadClipboard: ps?.CanReadClipboard ?? false,
+            ReadClipboardClearance: ps?.ReadClipboardClearance ?? PermissionClearance.Unset,
+            CanWriteClipboard: ps?.CanWriteClipboard ?? false,
+            WriteClipboardClearance: ps?.WriteClipboardClearance ?? PermissionClearance.Unset,
             DangerousShellAccesses: MapGrants(ps?.DangerousShellAccesses, a => a.SystemUserId, a => a.Clearance),
             SafeShellAccesses: MapGrants(ps?.SafeShellAccesses, a => a.ContainerId, a => a.Clearance),
             ContainerAccesses: MapGrants(ps?.ContainerAccesses, a => a.ContainerId, a => a.Clearance),
             WebsiteAccesses: MapGrants(ps?.WebsiteAccesses, a => a.WebsiteId, a => a.Clearance),
             SearchEngineAccesses: MapGrants(ps?.SearchEngineAccesses, a => a.SearchEngineId, a => a.Clearance),
-            LocalInfoStoreAccesses: MapGrants(ps?.LocalInfoStorePermissions, a => a.LocalInformationStoreId, a => a.Clearance),
-            ExternalInfoStoreAccesses: MapGrants(ps?.ExternalInfoStorePermissions, a => a.ExternalInformationStoreId, a => a.Clearance),
+            InternalDatabaseAccesses: MapGrants(ps?.InternalDatabaseAccesses, a => a.InternalDatabaseId, a => a.Clearance),
+            ExternalDatabaseAccesses: MapGrants(ps?.ExternalDatabaseAccesses, a => a.ExternalDatabaseId, a => a.Clearance),
             AudioDeviceAccesses: MapGrants(ps?.AudioDeviceAccesses, a => a.AudioDeviceId, a => a.Clearance),
             DisplayDeviceAccesses: MapGrants(ps?.DisplayDeviceAccesses, a => a.DisplayDeviceId, a => a.Clearance),
             EditorSessionAccesses: MapGrants(ps?.EditorSessionAccesses, a => a.EditorSessionId, a => a.Clearance),
@@ -450,7 +538,9 @@ public sealed class RoleService(SharpClawDbContext db)
             TaskAccesses: MapGrants(ps?.TaskPermissions, a => a.ScheduledTaskId, a => a.Clearance),
             SkillAccesses: MapGrants(ps?.SkillPermissions, a => a.SkillId, a => a.Clearance),
             AgentHeaderAccesses: MapGrants(ps?.AgentHeaderAccesses, a => a.AgentId, a => a.Clearance),
-            ChannelHeaderAccesses: MapGrants(ps?.ChannelHeaderAccesses, a => a.ChannelId, a => a.Clearance));
+            ChannelHeaderAccesses: MapGrants(ps?.ChannelHeaderAccesses, a => a.ChannelId, a => a.Clearance),
+            DocumentSessionAccesses: MapGrants(ps?.DocumentSessionAccesses, a => a.DocumentSessionId, a => a.Clearance),
+            NativeApplicationAccesses: MapGrants(ps?.NativeApplicationAccesses, a => a.NativeApplicationId, a => a.Clearance));
 
     private static IReadOnlyList<ResourceGrant> MapGrants<T>(
         ICollection<T>? accesses,

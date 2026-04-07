@@ -76,9 +76,8 @@ public class AgentJobDB : BaseEntity
 
     /// <summary>
     /// Pipeline mode: <see cref="Enums.TranscriptionMode.SlidingWindow"/>
-    /// (overlapping, deduped), <see cref="Enums.TranscriptionMode.StrictStep"/>
-    /// (sequential short chunks), or <see cref="Enums.TranscriptionMode.StrictWindow"/>
-    /// (sequential full windows).  Null = default (SlidingWindow).
+    /// (overlapping, two-pass) or <see cref="Enums.TranscriptionMode.StrictWindow"/>
+    /// (sequential full windows, final-only).  Null = default (SlidingWindow).
     /// </summary>
     public TranscriptionMode? TranscriptionMode { get; set; }
 
@@ -88,8 +87,8 @@ public class AgentJobDB : BaseEntity
     public int? WindowSeconds { get; set; }
 
     /// <summary>
-    /// Seconds between inference ticks.  Null = default.  In Simple mode
-    /// this is ignored (step equals window — no overlap).
+    /// Seconds between inference ticks.  Null = default.  In StrictWindow
+    /// mode this is ignored (step equals window — no overlap).
     /// </summary>
     public int? StepSeconds { get; set; }
 

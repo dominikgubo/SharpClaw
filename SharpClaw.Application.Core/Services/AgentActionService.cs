@@ -41,12 +41,12 @@ public sealed class AgentActionService(SharpClawDbContext db)
             agentId, caller, p => p.CanCreateContainers, p => p.CreateContainersClearance,
             "create containers", onApproved, ct);
 
-    public Task<AgentActionResult> RegisterInfoStoreAsync(
+    public Task<AgentActionResult> RegisterDatabaseAsync(
         Guid agentId, ActionCaller caller,
         Func<Task>? onApproved = null, CancellationToken ct = default)
         => EvaluateGlobalFlagAsync(
-            agentId, caller, p => p.CanRegisterInfoStores, p => p.RegisterInfoStoresClearance,
-            "register information stores", onApproved, ct);
+            agentId, caller, p => p.CanRegisterDatabases, p => p.RegisterDatabasesClearance,
+            "register databases", onApproved, ct);
 
     public Task<AgentActionResult> AccessLocalhostInBrowserAsync(
         Guid agentId, ActionCaller caller,
@@ -83,6 +83,62 @@ public sealed class AgentActionService(SharpClawDbContext db)
             agentId, caller, p => p.CanReadCrossThreadHistory, p => p.ReadCrossThreadHistoryClearance,
             "read cross-thread history", onApproved, ct);
 
+    public Task<AgentActionResult> CreateDocumentSessionAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanCreateDocumentSessions, p => p.CreateDocumentSessionsClearance,
+            "create document sessions", onApproved, ct);
+
+    public Task<AgentActionResult> EnumerateWindowsAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanEnumerateWindows, p => p.EnumerateWindowsClearance,
+            "enumerate windows", onApproved, ct);
+
+    public Task<AgentActionResult> FocusWindowAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanFocusWindow, p => p.FocusWindowClearance,
+            "focus window", onApproved, ct);
+
+    public Task<AgentActionResult> CloseWindowAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanCloseWindow, p => p.CloseWindowClearance,
+            "close window", onApproved, ct);
+
+    public Task<AgentActionResult> ResizeWindowAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanResizeWindow, p => p.ResizeWindowClearance,
+            "resize window", onApproved, ct);
+
+    public Task<AgentActionResult> SendHotkeyAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanSendHotkey, p => p.SendHotkeyClearance,
+            "send hotkey", onApproved, ct);
+
+    public Task<AgentActionResult> ReadClipboardAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanReadClipboard, p => p.ReadClipboardClearance,
+            "read clipboard", onApproved, ct);
+
+    public Task<AgentActionResult> WriteClipboardAsync(
+        Guid agentId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateGlobalFlagAsync(
+            agentId, caller, p => p.CanWriteClipboard, p => p.WriteClipboardClearance,
+            "write clipboard", onApproved, ct);
+
     // ═══════════════════════════════════════════════════════════════
     // Per-resource actions
     // ═══════════════════════════════════════════════════════════════
@@ -103,21 +159,21 @@ public sealed class AgentActionService(SharpClawDbContext db)
             p => p.SafeShellAccesses, a => a.ContainerId, a => a.Clearance,
             "safe shell access", onApproved, ct);
 
-    public Task<AgentActionResult> AccessLocalInfoStoreAsync(
-        Guid agentId, Guid storeId, ActionCaller caller,
+    public Task<AgentActionResult> AccessInternalDatabaseAsync(
+        Guid agentId, Guid databaseId, ActionCaller caller,
         Func<Task>? onApproved = null, CancellationToken ct = default)
         => EvaluateResourceAccessAsync(
-            agentId, storeId, caller,
-            p => p.LocalInfoStorePermissions, a => a.LocalInformationStoreId, a => a.Clearance,
-            "local information store access", onApproved, ct);
+            agentId, databaseId, caller,
+            p => p.InternalDatabaseAccesses, a => a.InternalDatabaseId, a => a.Clearance,
+            "internal database access", onApproved, ct);
 
-    public Task<AgentActionResult> AccessExternalInfoStoreAsync(
-        Guid agentId, Guid storeId, ActionCaller caller,
+    public Task<AgentActionResult> AccessExternalDatabaseAsync(
+        Guid agentId, Guid databaseId, ActionCaller caller,
         Func<Task>? onApproved = null, CancellationToken ct = default)
         => EvaluateResourceAccessAsync(
-            agentId, storeId, caller,
-            p => p.ExternalInfoStorePermissions, a => a.ExternalInformationStoreId, a => a.Clearance,
-            "external information store access", onApproved, ct);
+            agentId, databaseId, caller,
+            p => p.ExternalDatabaseAccesses, a => a.ExternalDatabaseId, a => a.Clearance,
+            "external database access", onApproved, ct);
 
     public Task<AgentActionResult> AccessWebsiteAsync(
         Guid agentId, Guid websiteId, ActionCaller caller,
@@ -198,6 +254,22 @@ public sealed class AgentActionService(SharpClawDbContext db)
             agentId, botIntegrationId, caller,
             p => p.BotIntegrationAccesses, a => a.BotIntegrationId, a => a.Clearance,
             "bot integration access", onApproved, ct);
+
+    public Task<AgentActionResult> AccessDocumentSessionAsync(
+        Guid agentId, Guid documentSessionId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateResourceAccessAsync(
+            agentId, documentSessionId, caller,
+            p => p.DocumentSessionAccesses, a => a.DocumentSessionId, a => a.Clearance,
+            "document session access", onApproved, ct);
+
+    public Task<AgentActionResult> LaunchNativeApplicationAsync(
+        Guid agentId, Guid nativeApplicationId, ActionCaller caller,
+        Func<Task>? onApproved = null, CancellationToken ct = default)
+        => EvaluateResourceAccessAsync(
+            agentId, nativeApplicationId, caller,
+            p => p.NativeApplicationAccesses, a => a.NativeApplicationId, a => a.Clearance,
+            "native application launch", onApproved, ct);
 
     // ═══════════════════════════════════════════════════════════════
     // Core evaluation engine
@@ -401,8 +473,8 @@ public sealed class AgentActionService(SharpClawDbContext db)
         return await db.PermissionSets
             .Include(p => p.DangerousShellAccesses)
             .Include(p => p.SafeShellAccesses)
-            .Include(p => p.LocalInfoStorePermissions)
-            .Include(p => p.ExternalInfoStorePermissions)
+            .Include(p => p.InternalDatabaseAccesses)
+            .Include(p => p.ExternalDatabaseAccesses)
             .Include(p => p.WebsiteAccesses)
             .Include(p => p.SearchEngineAccesses)
             .Include(p => p.ContainerAccesses)

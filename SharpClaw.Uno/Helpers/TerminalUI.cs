@@ -60,8 +60,8 @@ internal static class TerminalUI
         ("containerAccesses", "Containers"),
         ("websiteAccesses", "Websites"),
         ("searchEngineAccesses", "Search Engines"),
-        ("localInfoStoreAccesses", "Local Info Stores"),
-        ("externalInfoStoreAccesses", "External Info Stores"),
+        ("internalDatabaseAccesses", "Internal Databases"),
+        ("externalDatabaseAccesses", "External Databases"),
         ("audioDeviceAccesses", "Audio Devices"),
         ("displayDeviceAccesses", "Display Devices"),
         ("editorSessionAccesses", "Editor Sessions"),
@@ -70,25 +70,33 @@ internal static class TerminalUI
         ("skillAccesses", "Skill Management"),
         ("agentHeaderAccesses", "Agent Header Editing"),
         ("channelHeaderAccesses", "Channel Header Editing"),
+        ("documentSessionAccesses", "Document Sessions"),
+        ("nativeApplicationAccesses", "Native Applications"),
     ];
 
     public static readonly string[] GlobalFlagNames =
-        ["canCreateSubAgents", "canCreateContainers", "canRegisterInfoStores",
+        ["canCreateSubAgents", "canCreateContainers", "canRegisterDatabases",
          "canAccessLocalhostInBrowser", "canAccessLocalhostCli",
          "canClickDesktop", "canTypeOnDesktop", "canReadCrossThreadHistory",
-         "canEditAgentHeader", "canEditChannelHeader"];
+         "canEditAgentHeader", "canEditChannelHeader",
+         "canCreateDocumentSessions", "canEnumerateWindows",
+         "canFocusWindow", "canCloseWindow", "canResizeWindow",
+         "canSendHotkey", "canReadClipboard", "canWriteClipboard"];
 
     public static readonly string[] GlobalFlagClearanceNames =
-        ["createSubAgentsClearance", "createContainersClearance", "registerInfoStoresClearance",
+        ["createSubAgentsClearance", "createContainersClearance", "registerDatabasesClearance",
          "accessLocalhostInBrowserClearance", "accessLocalhostCliClearance",
          "clickDesktopClearance", "typeOnDesktopClearance", "readCrossThreadHistoryClearance",
-         "editAgentHeaderClearance", "editChannelHeaderClearance"];
+         "editAgentHeaderClearance", "editChannelHeaderClearance",
+         "createDocumentSessionsClearance", "enumerateWindowsClearance",
+         "focusWindowClearance", "closeWindowClearance", "resizeWindowClearance",
+         "sendHotkeyClearance", "readClipboardClearance", "writeClipboardClearance"];
 
     public static readonly Dictionary<string, string> GlobalFlagTooltips = new()
     {
         ["canCreateSubAgents"] = "Allow the agent to spawn child agents on its own",
         ["canCreateContainers"] = "Allow the agent to create sandboxed execution containers",
-        ["canRegisterInfoStores"] = "Allow the agent to register local or external information stores",
+        ["canRegisterDatabases"] = "Allow the agent to register internal or external databases",
         ["canAccessLocalhostInBrowser"] = "Allow the agent to open localhost URLs in a headless browser",
         ["canAccessLocalhostCli"] = "Allow the agent to make direct HTTP requests to localhost",
         ["canClickDesktop"] = "Allow the agent to simulate mouse clicks on the desktop",
@@ -96,6 +104,14 @@ internal static class TerminalUI
         ["canReadCrossThreadHistory"] = "Allow the agent to read conversation history from other threads and channels",
         ["canEditAgentHeader"] = "Allow editing the custom chat header of specific agents",
         ["canEditChannelHeader"] = "Allow editing the custom chat header of specific channels",
+        ["canCreateDocumentSessions"] = "Allow the agent to register document files (spreadsheets, CSV) as sessions",
+        ["canEnumerateWindows"] = "Allow the agent to list visible desktop windows (title, process, path)",
+        ["canFocusWindow"] = "Allow the agent to bring windows to the foreground",
+        ["canCloseWindow"] = "Allow the agent to send close signals to windows (graceful)",
+        ["canResizeWindow"] = "Allow the agent to move, resize, minimize, or maximize windows",
+        ["canSendHotkey"] = "Allow the agent to send keyboard shortcuts (Ctrl+S, Alt+Tab, etc.)",
+        ["canReadClipboard"] = "Allow the agent to read clipboard contents (text, files, images)",
+        ["canWriteClipboard"] = "Allow the agent to set clipboard contents (text or file paths)",
     };
 
     public static readonly Dictionary<string, string> ResourceAccessTooltips = new()
@@ -105,8 +121,8 @@ internal static class TerminalUI
         ["containerAccesses"] = "Access to sandboxed execution containers",
         ["websiteAccesses"] = "Access to registered website resources",
         ["searchEngineAccesses"] = "Access to registered search engine resources",
-        ["localInfoStoreAccesses"] = "Access to local information store files",
-        ["externalInfoStoreAccesses"] = "Access to external information store endpoints",
+        ["internalDatabaseAccesses"] = "Access to SharpClaw-managed internal databases",
+        ["externalDatabaseAccesses"] = "Access to registered external database endpoints",
         ["audioDeviceAccesses"] = "Access to audio capture devices for transcription",
         ["displayDeviceAccesses"] = "Access to display devices for screen capture",
         ["editorSessionAccesses"] = "Access to IDE editor sessions via the editor bridge",
@@ -115,6 +131,8 @@ internal static class TerminalUI
         ["skillAccesses"] = "Access registered skills and their definitions",
         ["agentHeaderAccesses"] = "Edit the custom chat header of specific agents",
         ["channelHeaderAccesses"] = "Edit the custom chat header of specific channels",
+        ["documentSessionAccesses"] = "Access to registered document files for spreadsheet operations",
+        ["nativeApplicationAccesses"] = "Access to registered desktop applications for launch and process control",
     };
 
     public static readonly (string Tag, string Label)[] ClearanceOptions =

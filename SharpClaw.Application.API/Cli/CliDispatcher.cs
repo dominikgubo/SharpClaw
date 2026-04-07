@@ -20,7 +20,9 @@ using SharpClaw.Contracts.DTOs.Providers;
 using SharpClaw.Contracts.DTOs.Containers;
 using SharpClaw.Contracts.DTOs.DefaultResources;
 using SharpClaw.Contracts.DTOs.DisplayDevices;
+using SharpClaw.Contracts.DTOs.Documents;
 using SharpClaw.Contracts.DTOs.LocalModels;
+using SharpClaw.Contracts.DTOs.NativeApplications;
 using SharpClaw.Contracts.DTOs.Roles;
 using SharpClaw.Contracts.DTOs.Transcription;
 using SharpClaw.Contracts.DTOs.Tools;
@@ -1072,20 +1074,20 @@ public static class CliDispatcher
         var d = current;
         return key switch
         {
-            "safeshell" => new(d.DangerousShellResourceId, value, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "dangshell" or "dangerousshell" => new(value, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "container" => new(d.DangerousShellResourceId, d.SafeShellResourceId, value, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "website" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, value, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "search" or "searchengine" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, value, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "localinfo" or "localinfostore" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, value, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "externalinfo" or "externalinfostore" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, value, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "audiodevice" or "audio" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, value, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "displaydevice" or "display" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, value, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "agent" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, value, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "task" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, value, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "skill" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, value, d.TranscriptionModelId, d.EditorSessionResourceId),
-            "transcriptionmodel" or "model" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, value, d.EditorSessionResourceId),
-            "editorsession" or "editor" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.LocalInfoStoreResourceId, d.ExternalInfoStoreResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, value),
+            "safeshell" => new(d.DangerousShellResourceId, value, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "dangshell" or "dangerousshell" => new(value, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "container" => new(d.DangerousShellResourceId, d.SafeShellResourceId, value, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "website" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, value, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "search" or "searchengine" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, value, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "internaldb" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, value, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "externaldb" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, value, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "audiodevice" or "audio" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, value, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "displaydevice" or "display" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, value, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "agent" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, value, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "task" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, value, d.SkillResourceId, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "skill" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, value, d.TranscriptionModelId, d.EditorSessionResourceId),
+            "transcriptionmodel" or "model" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, value, d.EditorSessionResourceId),
+            "editorsession" or "editor" => new(d.DangerousShellResourceId, d.SafeShellResourceId, d.ContainerResourceId, d.WebsiteResourceId, d.SearchEngineResourceId, d.InternalDatabaseResourceId, d.ExternalDatabaseResourceId, d.AudioDeviceResourceId, d.DisplayDeviceResourceId, d.AgentResourceId, d.TaskResourceId, d.SkillResourceId, d.TranscriptionModelId, value),
             _ => null,
         };
     }
@@ -1705,19 +1707,29 @@ public static class CliDispatcher
                 "  --clearance <level>                     Default clearance (Unset, Independent, etc.)",
                 "  --create-sub-agents                     Grant CanCreateSubAgents",
                 "  --create-containers                     Grant CanCreateContainers",
-                "  --register-info-stores                  Grant CanRegisterInfoStores",
+                "  --register-databases                    Grant CanRegisterDatabases",
                 "  --localhost-browser                     Grant CanAccessLocalhostInBrowser",
                 "  --localhost-cli                         Grant CanAccessLocalhostCli",
                 "  --click-desktop                         Grant CanClickDesktop",
                 "  --type-on-desktop                       Grant CanTypeOnDesktop",
                 "  --read-cross-thread-history             Grant CanReadCrossThreadHistory",
+                "  --edit-agent-header                     Grant CanEditAgentHeader",
+                "  --edit-channel-header                   Grant CanEditChannelHeader",
+                "  --create-document-sessions              Grant CanCreateDocumentSessions",
+                "  --enumerate-windows                     Grant CanEnumerateWindows",
+                "  --focus-window                          Grant CanFocusWindow",
+                "  --close-window                          Grant CanCloseWindow",
+                "  --resize-window                         Grant CanResizeWindow",
+                "  --send-hotkey                           Grant CanSendHotkey",
+                "  --read-clipboard                        Grant CanReadClipboard",
+                "  --write-clipboard                       Grant CanWriteClipboard",
                 "  --dangerous-shell <id>[:<clearance>]    Add DangerousShell grant",
                 "  --safe-shell <id>[:<clearance>]         Add SafeShell grant",
                 "  --container <id>[:<clearance>]          Add Container grant",
                 "  --website <id>[:<clearance>]            Add Website grant",
                 "  --search-engine <id>[:<clearance>]      Add SearchEngine grant",
-                "  --local-info <id>[:<clearance>]         Add LocalInfoStore grant",
-                "  --external-info <id>[:<clearance>]      Add ExternalInfoStore grant",
+                "  --internal-db <id>[:<clearance>]        Add InternalDatabase grant",
+                "  --external-db <id>[:<clearance>]        Add ExternalDatabase grant",
                 "  --audio-device <id>[:<clearance>]       Add AudioDevice grant",
                 "  --agent <id>[:<clearance>]              Add Agent grant",
                 "  --task <id>[:<clearance>]               Add Task grant",
@@ -1775,20 +1787,30 @@ public static class CliDispatcher
         var clearance = PermissionClearance.Unset;
         var createSubAgents = false;
         var createContainers = false;
-        var registerInfoStores = false;
+        var registerDatabases = false;
         var localhostBrowser = false;
         var localhostCli = false;
         var clickDesktop = false;
         var typeOnDesktop = false;
         var readCrossThreadHistory = false;
+        var editAgentHeader = false;
+        var editChannelHeader = false;
+        var createDocumentSessions = false;
+        var enumerateWindows = false;
+        var focusWindow = false;
+        var closeWindow = false;
+        var resizeWindow = false;
+        var sendHotkey = false;
+        var readClipboard = false;
+        var writeClipboard = false;
 
         var dangerousShell = new List<ResourceGrant>();
         var safeShell = new List<ResourceGrant>();
         var container = new List<ResourceGrant>();
         var website = new List<ResourceGrant>();
         var searchEngine = new List<ResourceGrant>();
-        var localInfo = new List<ResourceGrant>();
-        var externalInfo = new List<ResourceGrant>();
+        var internalDb = new List<ResourceGrant>();
+        var externalDb = new List<ResourceGrant>();
         var audioDevice = new List<ResourceGrant>();
         var agent = new List<ResourceGrant>();
         var task = new List<ResourceGrant>();
@@ -1804,12 +1826,22 @@ public static class CliDispatcher
                     break;
                 case "--create-sub-agents": createSubAgents = true; break;
                 case "--create-containers": createContainers = true; break;
-                case "--register-info-stores": registerInfoStores = true; break;
+                case "--register-databases": registerDatabases = true; break;
                 case "--localhost-browser": localhostBrowser = true; break;
                 case "--localhost-cli": localhostCli = true; break;
                 case "--click-desktop": clickDesktop = true; break;
                 case "--type-on-desktop": typeOnDesktop = true; break;
                 case "--read-cross-thread-history": readCrossThreadHistory = true; break;
+                case "--edit-agent-header": editAgentHeader = true; break;
+                case "--edit-channel-header": editChannelHeader = true; break;
+                case "--create-document-sessions": createDocumentSessions = true; break;
+                case "--enumerate-windows": enumerateWindows = true; break;
+                case "--focus-window": focusWindow = true; break;
+                case "--close-window": closeWindow = true; break;
+                case "--resize-window": resizeWindow = true; break;
+                case "--send-hotkey": sendHotkey = true; break;
+                case "--read-clipboard": readClipboard = true; break;
+                case "--write-clipboard": writeClipboard = true; break;
                 case "--dangerous-shell" when i + 1 < args.Length:
                     dangerousShell.Add(ParseResourceGrant(args[++i])); break;
                 case "--safe-shell" when i + 1 < args.Length:
@@ -1820,10 +1852,10 @@ public static class CliDispatcher
                     website.Add(ParseResourceGrant(args[++i])); break;
                 case "--search-engine" when i + 1 < args.Length:
                     searchEngine.Add(ParseResourceGrant(args[++i])); break;
-                case "--local-info" when i + 1 < args.Length:
-                    localInfo.Add(ParseResourceGrant(args[++i])); break;
-                case "--external-info" when i + 1 < args.Length:
-                    externalInfo.Add(ParseResourceGrant(args[++i])); break;
+                case "--internal-db" when i + 1 < args.Length:
+                    internalDb.Add(ParseResourceGrant(args[++i])); break;
+                case "--external-db" when i + 1 < args.Length:
+                    externalDb.Add(ParseResourceGrant(args[++i])); break;
                 case "--audio-device" when i + 1 < args.Length:
                     audioDevice.Add(ParseResourceGrant(args[++i])); break;
                 case "--agent" when i + 1 < args.Length:
@@ -1839,19 +1871,29 @@ public static class CliDispatcher
             DefaultClearance: clearance,
             CanCreateSubAgents: createSubAgents,
             CanCreateContainers: createContainers,
-            CanRegisterInfoStores: registerInfoStores,
+            CanRegisterDatabases: registerDatabases,
             CanAccessLocalhostInBrowser: localhostBrowser,
             CanAccessLocalhostCli: localhostCli,
             CanClickDesktop: clickDesktop,
             CanTypeOnDesktop: typeOnDesktop,
             CanReadCrossThreadHistory: readCrossThreadHistory,
+            CanEditAgentHeader: editAgentHeader,
+            CanEditChannelHeader: editChannelHeader,
+            CanCreateDocumentSessions: createDocumentSessions,
+            CanEnumerateWindows: enumerateWindows,
+            CanFocusWindow: focusWindow,
+            CanCloseWindow: closeWindow,
+            CanResizeWindow: resizeWindow,
+            CanSendHotkey: sendHotkey,
+            CanReadClipboard: readClipboard,
+            CanWriteClipboard: writeClipboard,
             DangerousShellAccesses: dangerousShell.Count > 0 ? dangerousShell : null,
             SafeShellAccesses: safeShell.Count > 0 ? safeShell : null,
             ContainerAccesses: container.Count > 0 ? container : null,
             WebsiteAccesses: website.Count > 0 ? website : null,
             SearchEngineAccesses: searchEngine.Count > 0 ? searchEngine : null,
-            LocalInfoStoreAccesses: localInfo.Count > 0 ? localInfo : null,
-            ExternalInfoStoreAccesses: externalInfo.Count > 0 ? externalInfo : null,
+            InternalDatabaseAccesses: internalDb.Count > 0 ? internalDb : null,
+            ExternalDatabaseAccesses: externalDb.Count > 0 ? externalDb : null,
             AudioDeviceAccesses: audioDevice.Count > 0 ? audioDevice : null,
             AgentAccesses: agent.Count > 0 ? agent : null,
             TaskAccesses: task.Count > 0 ? task : null,
@@ -1908,10 +1950,10 @@ public static class CliDispatcher
                 "job listen <jobId>                         Stream live transcription segments",
                 "",
                 "Action types (global): CreateSubAgent, CreateContainer,",
-                "  RegisterInfoStore, AccessLocalhostInBrowser, AccessLocalhostCli",
+                "  RegisterDatabase, AccessLocalhostInBrowser, AccessLocalhostCli",
                 "Action types (resource): UnsafeExecuteAsDangerousShell, ExecuteAsSafeShell,",
-                "  AccessLocalInfoStore,",
-                "  AccessExternalInfoStore, AccessWebsite, QuerySearchEngine,",
+                "  AccessInternalDatabases,",
+                "  AccessExternalDatabase, AccessWebsite, QuerySearchEngine,",
                 "  AccessContainer, ManageAgent, EditTask, AccessSkill",
                 "Transcription types: TranscribeFromAudioDevice,",
                 "  TranscribeFromAudioStream (API only), TranscribeFromAudioFile (API only)",
@@ -2014,8 +2056,6 @@ public static class CliDispatcher
                     var modeArg = args[++i];
                     if (string.Equals(modeArg, "sliding", StringComparison.OrdinalIgnoreCase))
                         transcriptionMode = TranscriptionMode.SlidingWindow;
-                    else if (string.Equals(modeArg, "step", StringComparison.OrdinalIgnoreCase))
-                        transcriptionMode = TranscriptionMode.StrictStep;
                     else if (string.Equals(modeArg, "window", StringComparison.OrdinalIgnoreCase))
                         transcriptionMode = TranscriptionMode.StrictWindow;
                     else if (Enum.TryParse<TranscriptionMode>(modeArg, true, out var m))
@@ -2624,7 +2664,8 @@ public static class CliDispatcher
             PrintUsage(
                 "resource <type> <command> [args...]",
                 "",
-                "Types: container, audiodevice, displaydevice",
+                "Types: container, audiodevice, displaydevice, editorsession,",
+                "       document, nativeapplication",
                 "",
                 "Commands (all types):",
                 "  add      Create a new resource",
@@ -2643,8 +2684,10 @@ public static class CliDispatcher
             "audiodevice" => await HandleResourceAudioDeviceCommand(args, sp),
             "displaydevice" or "display" or "dd" => await HandleResourceDisplayDeviceCommand(args, sp),
             "editorsession" or "editor" or "es" => await HandleResourceEditorSessionCommand(args, sp),
+            "document" or "doc" => await HandleResourceDocumentCommand(args, sp),
+            "nativeapplication" or "nativeapp" or "app" => await HandleResourceNativeApplicationCommand(args, sp),
             _ => UsageResult($"Unknown resource type: {type}. " +
-                "Available: container, audiodevice, displaydevice, editorsession")
+                "Available: container, audiodevice, displaydevice, editorsession, document, nativeapplication")
         };
     }
 
@@ -2811,6 +2854,111 @@ public static class CliDispatcher
             "sync" => await ResourceHandlers.SyncDisplayDevices(svc),
 
             _ => UsageResult($"Unknown command: resource displaydevice {sub}")
+        };
+    }
+
+    private static async Task<IResult?> HandleResourceDocumentCommand(
+        string[] args, IServiceProvider sp)
+    {
+        if (args.Length < 3)
+        {
+            PrintUsage(
+                "resource document add <filePath> [name] [description]",
+                "resource document get <id>                  Show a document session",
+                "resource document list                      List all document sessions",
+                "resource document update <id> [name] [desc] Update a document session",
+                "resource document delete <id>               Delete a document session");
+            return Results.Ok();
+        }
+
+        var sub = args[2].ToLowerInvariant();
+        var svc = sp.GetRequiredService<DocumentSessionService>();
+
+        return sub switch
+        {
+            "add" when args.Length >= 4
+                => await ResourceHandlers.CreateDocumentSession(
+                    new CreateDocumentSessionRequest(
+                        args[3],
+                        args.Length >= 5 ? args[4] : null,
+                        args.Length >= 6 ? string.Join(' ', args[5..]) : null),
+                    svc),
+            "add" => UsageResult("resource document add <filePath> [name] [description]"),
+
+            "get" when args.Length >= 4
+                => await ResourceHandlers.GetDocumentSession(CliIdMap.Resolve(args[3]), svc),
+            "get" => UsageResult("resource document get <id>"),
+
+            "list" => await ResourceHandlers.ListDocumentSessions(svc),
+
+            "update" when args.Length >= 5
+                => await ResourceHandlers.UpdateDocumentSession(
+                    CliIdMap.Resolve(args[3]),
+                    new UpdateDocumentSessionRequest(
+                        args.Length >= 5 ? args[4] : null,
+                        args.Length >= 6 ? string.Join(' ', args[5..]) : null),
+                    svc),
+            "update" => UsageResult("resource document update <id> [name] [description]"),
+
+            "delete" when args.Length >= 4
+                => await ResourceHandlers.DeleteDocumentSession(CliIdMap.Resolve(args[3]), svc),
+            "delete" => UsageResult("resource document delete <id>"),
+
+            _ => UsageResult($"Unknown command: resource document {sub}")
+        };
+    }
+
+    private static async Task<IResult?> HandleResourceNativeApplicationCommand(
+        string[] args, IServiceProvider sp)
+    {
+        if (args.Length < 3)
+        {
+            PrintUsage(
+                "resource nativeapp add <name> <exePath> [alias] [description]",
+                "resource nativeapp get <id>                  Show a native application",
+                "resource nativeapp list                      List all native applications",
+                "resource nativeapp update <id> [name] [exe] [alias] [desc]",
+                "resource nativeapp delete <id>               Delete a native application");
+            return Results.Ok();
+        }
+
+        var sub = args[2].ToLowerInvariant();
+        var svc = sp.GetRequiredService<NativeApplicationService>();
+
+        return sub switch
+        {
+            "add" when args.Length >= 5
+                => await ResourceHandlers.CreateNativeApplication(
+                    new CreateNativeApplicationRequest(
+                        args[3],
+                        args[4],
+                        args.Length >= 6 ? args[5] : null,
+                        args.Length >= 7 ? string.Join(' ', args[6..]) : null),
+                    svc),
+            "add" => UsageResult("resource nativeapp add <name> <executablePath> [alias] [description]"),
+
+            "get" when args.Length >= 4
+                => await ResourceHandlers.GetNativeApplication(CliIdMap.Resolve(args[3]), svc),
+            "get" => UsageResult("resource nativeapp get <id>"),
+
+            "list" => await ResourceHandlers.ListNativeApplications(svc),
+
+            "update" when args.Length >= 5
+                => await ResourceHandlers.UpdateNativeApplication(
+                    CliIdMap.Resolve(args[3]),
+                    new UpdateNativeApplicationRequest(
+                        args.Length >= 5 ? args[4] : null,
+                        args.Length >= 6 ? args[5] : null,
+                        args.Length >= 7 ? args[6] : null,
+                        args.Length >= 8 ? string.Join(' ', args[7..]) : null),
+                    svc),
+            "update" => UsageResult("resource nativeapp update <id> [name] [exePath] [alias] [description]"),
+
+            "delete" when args.Length >= 4
+                => await ResourceHandlers.DeleteNativeApplication(CliIdMap.Resolve(args[3]), svc),
+            "delete" => UsageResult("resource nativeapp delete <id>"),
+
+            _ => UsageResult($"Unknown command: resource nativeapplication {sub}")
         };
     }
 

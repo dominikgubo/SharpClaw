@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Net;
 using System.Net.Http;
 using System.Text.Json;
 using System.Text.Json.Serialization;
@@ -38,6 +39,12 @@ LiveTranscriptionOrchestrator orchestrator,
 EditorBridgeService editorBridge,
 SessionService session,
 BotMessageSenderService botMessageSender,
+SpreadsheetService spreadsheetService,
+ExcelComInteropService excelComInteropService,
+DocumentSessionService documentSessionService,
+DesktopAwarenessService desktopAwarenessService,
+NativeApplicationService nativeApplicationService,
+SearchEngineService searchEngineService,
 IConfiguration configuration)
 {
     /// <summary>
@@ -735,6 +742,14 @@ IConfiguration configuration)
             AgentActionType.AccessLocalhostCli
                 => await ExecuteAccessLocalhostCliAsync(job, ct),
 
+            // External website access (per-resource: registered website)
+            AgentActionType.AccessWebsite
+                => await ExecuteAccessWebsiteAsync(job, ct),
+
+            // Search engine query (per-resource: registered search engine)
+            AgentActionType.QuerySearchEngine
+                => await ExecuteQuerySearchEngineAsync(job, ct),
+
             // Display capture
             AgentActionType.CaptureDisplay
                 => await ExecuteCaptureDisplayAsync(job, ct),
@@ -761,6 +776,59 @@ IConfiguration configuration)
             // Bot messaging
             AgentActionType.SendBotMessage
                 => await ExecuteSendBotMessageAsync(job, ct),
+
+            // Document session registration
+            AgentActionType.CreateDocumentSession
+                => await ExecuteCreateDocumentSessionAsync(job, ct),
+
+            // File-based spreadsheet operations (ClosedXML / CsvHelper)
+            AgentActionType.SpreadsheetReadRange or
+            AgentActionType.SpreadsheetWriteRange or
+            AgentActionType.SpreadsheetListSheets or
+            AgentActionType.SpreadsheetCreateSheet or
+            AgentActionType.SpreadsheetDeleteSheet or
+            AgentActionType.SpreadsheetGetInfo
+                => await ExecuteSpreadsheetActionAsync(job, ct),
+
+            AgentActionType.SpreadsheetCreateWorkbook
+                => await ExecuteSpreadsheetCreateWorkbookAsync(job, ct),
+
+            // Live Excel COM Interop operations
+            AgentActionType.SpreadsheetLiveReadRange or
+            AgentActionType.SpreadsheetLiveWriteRange
+                => await ExecuteSpreadsheetLiveActionAsync(job, ct),
+
+            // Desktop awareness
+            AgentActionType.EnumerateWindows
+                => await ExecuteEnumerateWindowsAsync(job, ct),
+            AgentActionType.LaunchNativeApplication
+                => await ExecuteLaunchNativeApplicationAsync(job, ct),
+
+            // Window management
+            AgentActionType.FocusWindow
+                => await ExecuteFocusWindowAsync(job, ct),
+            AgentActionType.CloseWindow
+                => await ExecuteCloseWindowAsync(job, ct),
+            AgentActionType.ResizeWindow
+                => await ExecuteResizeWindowAsync(job, ct),
+
+            // Hotkey
+            AgentActionType.SendHotkey
+                => await ExecuteSendHotkeyAsync(job, ct),
+
+            // Window capture
+            AgentActionType.CaptureWindow
+                => await ExecuteCaptureWindowAsync(job, ct),
+
+            // Clipboard
+            AgentActionType.ReadClipboard
+                => await ExecuteReadClipboardAsync(job, ct),
+            AgentActionType.WriteClipboard
+                => await ExecuteWriteClipboardAsync(job, ct),
+
+            // Process control
+            AgentActionType.StopProcess
+                => await ExecuteStopProcessAsync(job, ct),
 
             _ => $"Action '{job.ActionType}' executed successfully " +
                  $"(resource: {job.ResourceId?.ToString() ?? "n/a"})."
@@ -1471,6 +1539,460 @@ IConfiguration configuration)
     };
 
     // ═══════════════════════════════════════════════════════════════
+    // QUERY SEARCH ENGINE
+    // ═══════════════════════════════════════════════════════════════
+
+    private sealed class QuerySearchEnginePayload
+    {
+        public string? ResourceId { get; set; }
+        public string? TargetId { get; set; }
+        public string? Query { get; set; }
+        public int? Count { get; set; }
+        public int? Offset { get; set; }
+        public string? Language { get; set; }
+        public string? Region { get; set; }
+        public string? SafeSearch { get; set; }
+        public string? DateRestrict { get; set; }
+        public string? SiteRestrict { get; set; }
+        public string? FileType { get; set; }
+        public string? ExactTerms { get; set; }
+        public string? ExcludeTerms { get; set; }
+        public string? SearchType { get; set; }
+        public string? SortBy { get; set; }
+        public string? Topic { get; set; }
+        public string? Category { get; set; }
+    }
+
+    /// <summary>
+    /// Executes a search query against a registered <see cref="SearchEngineDB"/>.
+    /// The engine's <see cref="SearchEngineType"/> determines which API-specific
+    /// parameters are forwarded by <see cref="SearchEngineService.QueryAsync"/>.
+    /// </summary>
+    private async Task<string?> ExecuteQuerySearchEngineAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        if (!job.ResourceId.HasValue)
+            throw new InvalidOperationException(
+                "QuerySearchEngine requires a ResourceId (search engine).");
+
+        var engine = await db.SearchEngines
+            .Include(e => e.Skill)
+            .FirstOrDefaultAsync(e => e.Id == job.ResourceId.Value, ct)
+            ?? throw new InvalidOperationException(
+                $"Search engine {job.ResourceId} not found.");
+
+        var payload = DeserializePayload<QuerySearchEnginePayload>(job,
+            "QuerySearchEngine");
+
+        if (string.IsNullOrWhiteSpace(payload.Query))
+            throw new InvalidOperationException(
+                "QuerySearchEngine requires a 'query' field.");
+
+        AddLog(job, $"Search engine '{engine.Name}' ({engine.Type}): {payload.Query}");
+        await db.SaveChangesAsync(ct);
+
+        var result = await searchEngineService.QueryAsync(
+            engine,
+            payload.Query,
+            count: payload.Count ?? 10,
+            offset: payload.Offset ?? 0,
+            language: payload.Language,
+            region: payload.Region,
+            safeSearch: payload.SafeSearch,
+            dateRestrict: payload.DateRestrict,
+            siteRestrict: payload.SiteRestrict,
+            fileType: payload.FileType,
+            exactTerms: payload.ExactTerms,
+            excludeTerms: payload.ExcludeTerms,
+            searchType: payload.SearchType,
+            sortBy: payload.SortBy,
+            topic: payload.Topic,
+            category: payload.Category,
+            ct: ct);
+
+        if (engine.Skill is { SkillText.Length: > 0 } skill)
+            result = $"[Search Engine Skill: {skill.Name}]\n{skill.SkillText}\n\n---\n\n{result}";
+
+        return result;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // ACCESS WEBSITE — external sites, hardened
+    // ═══════════════════════════════════════════════════════════════
+
+    private sealed class AccessWebsitePayload
+    {
+        public string? ResourceId { get; set; }
+        public string? TargetId { get; set; }
+        public string? Mode { get; set; }
+        public string? Path { get; set; }
+    }
+
+    /// <summary>
+    /// Maximum response body size (2 MB) to prevent memory exhaustion from
+    /// malicious or very large external pages.
+    /// </summary>
+    private const int MaxWebsiteResponseBytes = 2 * 1024 * 1024;
+
+    /// <summary>
+    /// Content-Type prefixes that are considered safe to return as text.
+    /// Binary types (images, executables, archives, etc.) are blocked.
+    /// </summary>
+    private static readonly string[] SafeContentTypePrefixes =
+    [
+        "text/",
+        "application/json",
+        "application/xml",
+        "application/xhtml+xml",
+        "application/javascript",
+        "application/x-javascript",
+    ];
+
+    /// <summary>
+    /// Fetches an external website registered in <see cref="WebsiteDB"/>
+    /// using either a headless browser (<c>mode=html|screenshot</c>) or
+    /// a direct HTTP GET (<c>mode=cli</c>, the default).
+    /// <para>
+    /// Unlike localhost access, external websites are untrusted.
+    /// The following precautions are enforced:
+    /// <list type="bullet">
+    ///   <item>Only the registered base URL (plus optional <c>path</c>
+    ///         suffix) is allowed — agents cannot browse arbitrary
+    ///         external sites.</item>
+    ///   <item>Responses are capped at <see cref="MaxWebsiteResponseBytes"/>
+    ///         to prevent memory exhaustion.</item>
+    ///   <item>Binary content types are rejected — only text-based
+    ///         responses are returned to the agent.</item>
+    ///   <item>Browser mode uses <c>--disable-downloads</c> to prevent
+    ///         the headless browser from saving files to disk.</item>
+    ///   <item>Redirect chains are limited to 10 hops and must stay
+    ///         within the registered origin (scheme + host + port).</item>
+    ///   <item>Private/loopback IPs are blocked to prevent SSRF.</item>
+    ///   <item>30-second hard timeout kills runaway requests.</item>
+    /// </list>
+    /// </para>
+    /// </summary>
+    private async Task<string?> ExecuteAccessWebsiteAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        if (!job.ResourceId.HasValue)
+            throw new InvalidOperationException(
+                "AccessWebsite requires a ResourceId (Website).");
+
+        var website = await db.Websites
+            .Include(w => w.Skill)
+            .FirstOrDefaultAsync(w => w.Id == job.ResourceId.Value, ct)
+            ?? throw new InvalidOperationException(
+                $"Website {job.ResourceId} not found.");
+
+        var payload = DeserializePayload<AccessWebsitePayload>(job, "AccessWebsite");
+        var mode = (payload.Mode ?? "cli").ToLowerInvariant();
+
+        // Build the final URL: registered base + optional path suffix.
+        var url = BuildWebsiteUrl(website.Url, payload.Path);
+
+        // Validate the resolved URL is safe for external access.
+        ValidateExternalUrl(url, website.Url);
+
+        AddLog(job, $"Website '{website.Name}' ({mode}): {url}");
+        await db.SaveChangesAsync(ct);
+
+        string? result = mode switch
+        {
+            "html" or "screenshot"
+                => await ExecuteAccessWebsiteBrowserAsync(job, url, mode, ct),
+            _ => await ExecuteAccessWebsiteCliAsync(url, ct),
+        };
+
+        // Prepend skill instructions when available so the agent knows
+        // how to interpret the website's structure and navigation.
+        if (website.Skill is { SkillText.Length: > 0 } skill)
+            result = $"[Website Skill: {skill.Name}]\n{skill.SkillText}\n\n---\n\n{result}";
+
+        return result;
+    }
+
+    /// <summary>
+    /// Browser-based external website access.  Identical to the localhost
+    /// browser implementation but with hardened flags for untrusted sites.
+    /// </summary>
+    private async Task<string?> ExecuteAccessWebsiteBrowserAsync(
+        AgentJobDB job, string url, string mode, CancellationToken ct)
+    {
+        var executable = configuration["Browser:Executable"] ?? ResolveChromiumExecutable();
+        var extraArgs = configuration["Browser:Arguments"] ?? "--incognito";
+
+        var tempFile = mode == "screenshot"
+            ? System.IO.Path.Combine(System.IO.Path.GetTempPath(), $"sc_web_{job.Id:N}.png")
+            : null;
+
+        // Security: external sites get stricter flags than localhost.
+        //   --disable-downloads           — block all file downloads
+        //   --disable-extensions          — no extension side-effects
+        //   --disable-plugins             — no NPAPI/PPAPI plugins
+        //   --disable-popup-blocking      — *off* so popups don't spawn
+        //   --no-first-run               — skip Chrome first-run experience
+        //   --disable-background-networking — reduce background traffic
+        //   --disable-default-apps        — no default app installs
+        //   --disable-sync               — no account sync
+        //
+        // NOTE: --ignore-certificate-errors is intentionally OMITTED for
+        // external sites — a bad cert is a genuine red flag.
+        var securityFlags = "--disable-downloads --disable-extensions --disable-plugins " +
+                            "--no-first-run --disable-background-networking " +
+                            "--disable-default-apps --disable-sync";
+
+        var headlessArgs = mode switch
+        {
+            "screenshot" =>
+                $"--headless --disable-gpu --no-sandbox --virtual-time-budget=10000 " +
+                $"{securityFlags} {extraArgs} --screenshot=\"{tempFile}\" \"{url}\"",
+            _ =>
+                $"--headless --disable-gpu --no-sandbox --virtual-time-budget=10000 " +
+                $"{securityFlags} {extraArgs} --dump-dom \"{url}\"",
+        };
+
+        var psi = new System.Diagnostics.ProcessStartInfo
+        {
+            FileName = executable,
+            Arguments = headlessArgs,
+            UseShellExecute = false,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true,
+        };
+
+        using var process = new System.Diagnostics.Process { StartInfo = psi };
+        process.Start();
+
+        var stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
+        var stderrTask = process.StandardError.ReadToEndAsync(ct);
+
+        using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeoutCts.CancelAfter(TimeSpan.FromSeconds(30));
+
+        try
+        {
+            await process.WaitForExitAsync(timeoutCts.Token);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            try { process.Kill(entireProcessTree: true); } catch { /* best effort */ }
+            throw new InvalidOperationException(
+                $"Browser timed out after 30 seconds for URL: {url}");
+        }
+
+        var stdout = await stdoutTask;
+        var stderr = await stderrTask;
+
+        if (process.ExitCode != 0)
+            throw new InvalidOperationException(
+                $"Browser exited with code {process.ExitCode}.\nstderr: {stderr}");
+
+        if (mode == "screenshot" && tempFile is not null && File.Exists(tempFile))
+        {
+            var bytes = await File.ReadAllBytesAsync(tempFile, ct);
+            File.Delete(tempFile);
+            return $"Screenshot captured ({bytes.Length} bytes) of {url}\n[SCREENSHOT_BASE64]{Convert.ToBase64String(bytes)}";
+        }
+
+        return string.IsNullOrWhiteSpace(stdout) ? "(empty page)" : stdout;
+    }
+
+    /// <summary>
+    /// Direct HTTP GET for an external website. Enforces size limits,
+    /// content-type allow-listing, redirect origin pinning, and SSRF
+    /// protection.
+    /// </summary>
+    private async Task<string?> ExecuteAccessWebsiteCliAsync(
+        string url, CancellationToken ct)
+    {
+        // ── Handler: redirect pinning + SSRF protection ──────────
+        var allowedOrigin = new Uri(url).GetLeftPart(UriPartial.Authority);
+
+        using var handler = new HttpClientHandler
+        {
+            MaxAutomaticRedirections = 10,
+            AllowAutoRedirect = false, // we follow redirects manually
+        };
+
+        using var httpClient = new HttpClient(handler)
+        {
+            Timeout = TimeSpan.FromSeconds(30),
+            MaxResponseContentBufferSize = MaxWebsiteResponseBytes,
+        };
+
+        // Set a realistic user-agent so sites don't block us outright.
+        httpClient.DefaultRequestHeaders.UserAgent.ParseAdd(
+            "Mozilla/5.0 (compatible; SharpClaw/1.0; +https://github.com/mkn8rn/SharpClaw)");
+
+        // ── Manual redirect loop with origin pinning ─────────────
+        var currentUrl = url;
+        HttpResponseMessage response;
+        var redirectCount = 0;
+        const int maxRedirects = 10;
+
+        do
+        {
+            var requestUri = new Uri(currentUrl);
+            RejectPrivateAddress(requestUri);
+
+            response = await httpClient.GetAsync(
+                requestUri, HttpCompletionOption.ResponseHeadersRead, ct);
+
+            if ((int)response.StatusCode is >= 300 and < 400
+                && response.Headers.Location is { } location)
+            {
+                var redirectUri = location.IsAbsoluteUri
+                    ? location
+                    : new Uri(requestUri, location);
+
+                // Pin redirects to the original origin to prevent open-redirect SSRF.
+                if (!string.Equals(
+                        redirectUri.GetLeftPart(UriPartial.Authority),
+                        allowedOrigin, StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException(
+                        $"Redirect to a different origin is blocked: {redirectUri}");
+
+                currentUrl = redirectUri.AbsoluteUri;
+                response.Dispose();
+                redirectCount++;
+            }
+            else
+            {
+                break;
+            }
+        } while (redirectCount < maxRedirects);
+
+        if (redirectCount >= maxRedirects)
+            throw new InvalidOperationException(
+                $"Too many redirects ({maxRedirects}) for URL: {url}");
+
+        // ── Content-type guard: reject binary payloads ────────────
+        var contentType = response.Content.Headers.ContentType?.MediaType ?? "";
+        var isSafeContent = SafeContentTypePrefixes.Any(
+            prefix => contentType.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
+        if (!isSafeContent)
+        {
+            response.Dispose();
+            throw new InvalidOperationException(
+                $"Blocked: content type '{contentType}' is not text-based. " +
+                "Binary downloads are not permitted.");
+        }
+
+        // ── Read body with size cap ──────────────────────────────
+        await using var stream = await response.Content.ReadAsStreamAsync(ct);
+        using var reader = new StreamReader(stream);
+        var buffer = new char[MaxWebsiteResponseBytes / sizeof(char)];
+        var charsRead = await reader.ReadBlockAsync(buffer, 0, buffer.Length);
+        var body = new string(buffer, 0, charsRead);
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"HTTP {(int)response.StatusCode} {response.ReasonPhrase}");
+        foreach (var header in response.Headers)
+            sb.AppendLine($"{header.Key}: {string.Join(", ", header.Value)}");
+        foreach (var header in response.Content.Headers)
+            sb.AppendLine($"{header.Key}: {string.Join(", ", header.Value)}");
+        sb.AppendLine();
+        sb.Append(body);
+
+        if (!reader.EndOfStream)
+            sb.AppendLine("\n\n[TRUNCATED — response exceeded 2 MB limit]");
+
+        return sb.ToString();
+    }
+
+    // ── Website helpers ──────────────────────────────────────────
+
+    /// <summary>
+    /// Builds the final URL by combining the website's registered base URL
+    /// with an optional agent-specified path suffix.
+    /// </summary>
+    private static string BuildWebsiteUrl(string baseUrl, string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+            return baseUrl;
+
+        // Prevent path traversal and injection.
+        if (path.Contains("..", StringComparison.Ordinal))
+            throw new InvalidOperationException(
+                "Path traversal ('..') is not permitted.");
+
+        // Strip leading slash to avoid double-slash.
+        var trimmedBase = baseUrl.TrimEnd('/');
+        var trimmedPath = path.TrimStart('/');
+
+        return $"{trimmedBase}/{trimmedPath}";
+    }
+
+    /// <summary>
+    /// Validates that the resolved URL is safe for external access:
+    /// must be http/https, must share the same origin as the registered
+    /// website, and must not target private/loopback addresses.
+    /// </summary>
+    private static void ValidateExternalUrl(string url, string registeredBaseUrl)
+    {
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri))
+            throw new InvalidOperationException($"Invalid URL: '{url}'.");
+
+        if (uri.Scheme is not ("http" or "https"))
+            throw new InvalidOperationException(
+                $"Only http/https schemes are allowed. Got: '{uri.Scheme}'.");
+
+        // The resolved URL must stay within the registered website's origin.
+        if (!Uri.TryCreate(registeredBaseUrl, UriKind.Absolute, out var baseUri))
+            throw new InvalidOperationException(
+                $"Registered website has an invalid base URL: '{registeredBaseUrl}'.");
+
+        if (!string.Equals(
+                uri.GetLeftPart(UriPartial.Authority),
+                baseUri.GetLeftPart(UriPartial.Authority),
+                StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException(
+                $"URL origin does not match the registered website. " +
+                $"Expected: {baseUri.GetLeftPart(UriPartial.Authority)}, " +
+                $"got: {uri.GetLeftPart(UriPartial.Authority)}.");
+
+        RejectPrivateAddress(uri);
+    }
+
+    /// <summary>
+    /// Blocks requests to loopback and private IP ranges to prevent SSRF.
+    /// External website access must never target internal infrastructure.
+    /// </summary>
+    private static void RejectPrivateAddress(Uri uri)
+    {
+        if (uri.Host is "localhost" or "127.0.0.1" or "[::1]")
+            throw new InvalidOperationException(
+                "External website access cannot target localhost. " +
+                "Use the localhost tools instead.");
+
+        if (System.Net.IPAddress.TryParse(uri.Host, out var ip))
+        {
+            if (System.Net.IPAddress.IsLoopback(ip))
+                throw new InvalidOperationException(
+                    $"Blocked: loopback address '{uri.Host}'.");
+
+            // RFC 1918 / RFC 4193 private ranges
+            var bytes = ip.GetAddressBytes();
+            var isPrivate = bytes switch
+            {
+                [10, ..] => true,                                      // 10.0.0.0/8
+                [172, >= 16 and <= 31, ..] => true,                    // 172.16.0.0/12
+                [192, 168, ..] => true,                                // 192.168.0.0/16
+                [169, 254, ..] => true,                                // 169.254.0.0/16 (link-local)
+                [0, ..] => true,                                       // 0.0.0.0/8
+                _ => false,
+            };
+
+            if (isPrivate)
+                throw new InvalidOperationException(
+                    $"Blocked: private/reserved IP address '{uri.Host}'.");
+        }
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // CAPTURE DISPLAY
     // ═══════════════════════════════════════════════════════════════
 
@@ -2060,6 +2582,447 @@ IConfiguration configuration)
     }
 
     // ═══════════════════════════════════════════════════════════════
+    // DOCUMENT SESSION — register a file as a document session
+    // ═══════════════════════════════════════════════════════════════
+
+    private sealed class RegisterDocumentPayload
+    {
+        public string? FilePath { get; set; }
+        public string? Name { get; set; }
+        public string? Description { get; set; }
+    }
+
+    private async Task<string?> ExecuteCreateDocumentSessionAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        var payload = DeserializePayload<RegisterDocumentPayload>(job, "CreateDocumentSession");
+
+        if (string.IsNullOrWhiteSpace(payload.FilePath))
+            throw new InvalidOperationException(
+                "CreateDocumentSession requires a 'filePath' field.");
+
+        var fullPath = Path.GetFullPath(payload.FilePath);
+        if (!File.Exists(fullPath))
+            throw new InvalidOperationException(
+                $"File not found: {fullPath}");
+
+        var docSession = await documentSessionService.CreateAsync(
+            new Contracts.DTOs.Documents.CreateDocumentSessionRequest(
+                fullPath,
+                payload.Name ?? Path.GetFileNameWithoutExtension(fullPath),
+                payload.Description),
+            ct);
+
+        AddLog(job, $"Registered document session '{docSession.Name}' (id={docSession.Id}).");
+        return JsonSerializer.Serialize(new
+        {
+            sessionId = docSession.Id,
+            name = docSession.Name,
+            filePath = docSession.FilePath,
+            documentType = docSession.DocumentType.ToString(),
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SPREADSHEET — file-based (ClosedXML / CsvHelper)
+    // ═══════════════════════════════════════════════════════════════
+
+    private async Task<string?> ExecuteSpreadsheetActionAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        if (!job.ResourceId.HasValue)
+            throw new InvalidOperationException(
+                $"{job.ActionType} requires a ResourceId (DocumentSession).");
+
+        var docSession = await db.DocumentSessions.FirstOrDefaultAsync(
+            d => d.Id == job.ResourceId, ct)
+            ?? throw new InvalidOperationException(
+                $"Document session {job.ResourceId} not found.");
+
+        Dictionary<string, object?>? parameters = null;
+        if (!string.IsNullOrWhiteSpace(job.ScriptJson))
+        {
+            parameters = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                job.ScriptJson, _payloadJsonOptions);
+            parameters?.Remove("targetId");
+        }
+
+        var sheetName = parameters?.GetValueOrDefault("sheetName")?.ToString();
+        var range = parameters?.GetValueOrDefault("range")?.ToString();
+
+        AddLog(job, $"{job.ActionType} on '{docSession.Name}' ({docSession.FilePath})");
+        await db.SaveChangesAsync(ct);
+
+        return job.ActionType switch
+        {
+            AgentActionType.SpreadsheetReadRange
+                => spreadsheetService.ReadRange(docSession.FilePath, sheetName, range),
+            AgentActionType.SpreadsheetWriteRange
+                => spreadsheetService.WriteRange(
+                    docSession.FilePath, sheetName, range,
+                    ExtractJsonData(parameters)),
+            AgentActionType.SpreadsheetListSheets
+                => spreadsheetService.ListSheets(docSession.FilePath),
+            AgentActionType.SpreadsheetCreateSheet
+                => spreadsheetService.CreateSheet(
+                    docSession.FilePath,
+                    sheetName ?? throw new InvalidOperationException(
+                        "spreadsheet_create_sheet requires a 'sheetName' parameter.")),
+            AgentActionType.SpreadsheetDeleteSheet
+                => spreadsheetService.DeleteSheet(
+                    docSession.FilePath,
+                    sheetName ?? throw new InvalidOperationException(
+                        "spreadsheet_delete_sheet requires a 'sheetName' parameter.")),
+            AgentActionType.SpreadsheetGetInfo
+                => spreadsheetService.GetInfo(docSession.FilePath),
+            _ => throw new InvalidOperationException(
+                $"Unexpected spreadsheet action: {job.ActionType}"),
+        };
+    }
+
+    private async Task<string?> ExecuteSpreadsheetCreateWorkbookAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        Dictionary<string, object?>? parameters = null;
+        if (!string.IsNullOrWhiteSpace(job.ScriptJson))
+        {
+            parameters = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                job.ScriptJson, _payloadJsonOptions);
+        }
+
+        var filePath = parameters?.GetValueOrDefault("filePath")?.ToString()
+            ?? throw new InvalidOperationException(
+                "spreadsheet_create_workbook requires a 'filePath' parameter.");
+
+        var fullPath = Path.GetFullPath(filePath);
+        var sheetName = parameters?.GetValueOrDefault("sheetName")?.ToString();
+
+        AddLog(job, $"Creating workbook at '{fullPath}'");
+        await db.SaveChangesAsync(ct);
+
+        var result = spreadsheetService.CreateWorkbook(
+            fullPath, sheetName, ExtractJsonDataOrNull(parameters));
+
+        // Auto-register a DocumentSession for the new workbook
+        var docSession = await documentSessionService.CreateAsync(
+            new Contracts.DTOs.Documents.CreateDocumentSessionRequest(
+                fullPath,
+                Path.GetFileNameWithoutExtension(fullPath)),
+            ct);
+
+        AddLog(job, $"Auto-registered document session '{docSession.Name}' (id={docSession.Id}).");
+
+        return JsonSerializer.Serialize(new
+        {
+            sessionId = docSession.Id,
+            name = docSession.Name,
+            filePath = docSession.FilePath,
+            documentType = docSession.DocumentType.ToString(),
+            createResult = result,
+        });
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // SPREADSHEET — live Excel COM Interop (Windows only)
+    // ═══════════════════════════════════════════════════════════════
+
+    private async Task<string?> ExecuteSpreadsheetLiveActionAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        if (!job.ResourceId.HasValue)
+            throw new InvalidOperationException(
+                $"{job.ActionType} requires a ResourceId (DocumentSession).");
+
+        var docSession = await db.DocumentSessions.FirstOrDefaultAsync(
+            d => d.Id == job.ResourceId, ct)
+            ?? throw new InvalidOperationException(
+                $"Document session {job.ResourceId} not found.");
+
+        Dictionary<string, object?>? parameters = null;
+        if (!string.IsNullOrWhiteSpace(job.ScriptJson))
+        {
+            parameters = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                job.ScriptJson, _payloadJsonOptions);
+            parameters?.Remove("targetId");
+        }
+
+        var sheetName = parameters?.GetValueOrDefault("sheetName")?.ToString();
+        var range = parameters?.GetValueOrDefault("range")?.ToString();
+
+        AddLog(job, $"{job.ActionType} (live COM) on '{docSession.Name}' ({docSession.FilePath})");
+        await db.SaveChangesAsync(ct);
+
+        return job.ActionType switch
+        {
+            AgentActionType.SpreadsheetLiveReadRange
+                => excelComInteropService.ReadRange(docSession.FilePath, sheetName, range),
+            AgentActionType.SpreadsheetLiveWriteRange
+                => excelComInteropService.WriteRange(
+                    docSession.FilePath, sheetName, range,
+                    ExtractJsonData(parameters)),
+            _ => throw new InvalidOperationException(
+                $"Unexpected live spreadsheet action: {job.ActionType}"),
+        };
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // DESKTOP AWARENESS — enumerate windows / launch app
+    // ═══════════════════════════════════════════════════════════════
+
+    private Task<string?> ExecuteEnumerateWindowsAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        AddLog(job, "Enumerating desktop windows");
+        return Task.FromResult<string?>(desktopAwarenessService.EnumerateWindows());
+    }
+
+    private sealed class LaunchApplicationPayload
+    {
+        public string? TargetId { get; set; }
+        public string? Alias { get; set; }
+        public string? Arguments { get; set; }
+        public string? FilePath { get; set; }
+    }
+
+    private async Task<string?> ExecuteLaunchNativeApplicationAsync(
+        AgentJobDB job, CancellationToken ct)
+    {
+        Dictionary<string, object?>? parameters = null;
+        if (!string.IsNullOrWhiteSpace(job.ScriptJson))
+        {
+            parameters = JsonSerializer.Deserialize<Dictionary<string, object?>>(
+                job.ScriptJson, _payloadJsonOptions);
+            parameters?.Remove("targetId");
+            parameters?.Remove("alias");
+        }
+
+        // Resolve the native application by ResourceId (GUID) or alias.
+        NativeApplicationDB? app = null;
+
+        if (job.ResourceId.HasValue)
+        {
+            app = await db.NativeApplications.FirstOrDefaultAsync(
+                n => n.Id == job.ResourceId, ct);
+        }
+
+        if (app is null)
+        {
+            var alias = parameters?.GetValueOrDefault("alias")?.ToString();
+            if (!string.IsNullOrWhiteSpace(alias))
+                app = await nativeApplicationService.ResolveAsync(alias, ct);
+        }
+
+        if (app is null)
+            throw new InvalidOperationException(
+                job.ResourceId.HasValue
+                    ? $"Native application {job.ResourceId} not found."
+                    : "LaunchNativeApplication requires a targetId or alias.");
+
+        var arguments = parameters?.GetValueOrDefault("arguments")?.ToString();
+        var filePath = parameters?.GetValueOrDefault("filePath")?.ToString();
+
+        AddLog(job, $"Launching '{app.Name}' ({app.ExecutablePath})");
+        await db.SaveChangesAsync(ct);
+
+        return await desktopAwarenessService.LaunchApplicationAsync(
+            app, arguments, filePath, ct);
+    }
+
+    // ── Window management execution ───────────────────────────────
+
+    private sealed class WindowTargetPayload
+    {
+        public int? ProcessId { get; set; }
+        public string? ProcessName { get; set; }
+        public string? TitleContains { get; set; }
+    }
+
+    private Task<string?> ExecuteFocusWindowAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var p = ParseWindowTarget(job);
+        AddLog(job, "Focusing window");
+        return Task.FromResult<string?>(
+            desktopAwarenessService.FocusWindow(p.ProcessId, p.ProcessName, p.TitleContains));
+    }
+
+    private Task<string?> ExecuteCloseWindowAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var p = ParseWindowTarget(job);
+        AddLog(job, "Closing window");
+        return Task.FromResult<string?>(
+            desktopAwarenessService.CloseWindow(p.ProcessId, p.ProcessName, p.TitleContains));
+    }
+
+    private Task<string?> ExecuteResizeWindowAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var parameters = ParsePayload(job);
+        var processId = GetInt(parameters, "processId");
+        var titleContains = GetString(parameters, "titleContains");
+        var x = GetInt(parameters, "x");
+        var y = GetInt(parameters, "y");
+        var width = GetInt(parameters, "width");
+        var height = GetInt(parameters, "height");
+        var state = GetString(parameters, "state");
+
+        AddLog(job, "Resizing window");
+        return Task.FromResult<string?>(
+            desktopAwarenessService.ResizeWindow(processId, titleContains, x, y, width, height, state));
+    }
+
+    // ── Hotkey execution ──────────────────────────────────────────
+
+    private Task<string?> ExecuteSendHotkeyAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var parameters = ParsePayload(job);
+        var keys = GetString(parameters, "keys")
+            ?? throw new InvalidOperationException("send_hotkey requires a 'keys' parameter.");
+        var processId = GetInt(parameters, "processId");
+        var titleContains = GetString(parameters, "titleContains");
+
+        AddLog(job, $"Sending hotkey: {keys}");
+        return Task.FromResult<string?>(
+            desktopAwarenessService.SendHotkey(keys, processId, titleContains));
+    }
+
+    // ── Window capture execution ──────────────────────────────────
+
+    private Task<string?> ExecuteCaptureWindowAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var p = ParseWindowTarget(job);
+        AddLog(job, "Capturing window");
+        return Task.FromResult<string?>(
+            desktopAwarenessService.CaptureWindow(p.ProcessId, p.ProcessName, p.TitleContains));
+    }
+
+    // ── Clipboard execution ───────────────────────────────────────
+
+    private async Task<string?> ExecuteReadClipboardAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var parameters = ParsePayload(job);
+        var format = GetString(parameters, "format");
+        AddLog(job, "Reading clipboard");
+        return await desktopAwarenessService.ReadClipboardAsync(format);
+    }
+
+    private async Task<string?> ExecuteWriteClipboardAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var parameters = ParsePayload(job);
+        var text = GetString(parameters, "text");
+        string[]? filePaths = null;
+        if (parameters?.GetValueOrDefault("filePaths") is JsonElement je && je.ValueKind == JsonValueKind.Array)
+            filePaths = je.EnumerateArray().Select(e => e.GetString()!).ToArray();
+
+        AddLog(job, "Writing clipboard");
+        return await desktopAwarenessService.WriteClipboardAsync(text, filePaths);
+    }
+
+    // ── Process control execution ─────────────────────────────────
+
+    private async Task<string?> ExecuteStopProcessAsync(AgentJobDB job, CancellationToken ct)
+    {
+        var parameters = ParsePayload(job);
+        var processId = GetInt(parameters, "processId")
+            ?? throw new InvalidOperationException("stop_process requires a 'processId' parameter.");
+        var force = GetBool(parameters, "force") ?? false;
+
+        // Resolve native application from ResourceId
+        NativeApplicationDB? app = null;
+        if (job.ResourceId.HasValue)
+            app = await db.NativeApplications.FirstOrDefaultAsync(n => n.Id == job.ResourceId, ct);
+
+        app ??= await ResolveNativeAppByAlias(parameters, ct);
+
+        if (app is null)
+            throw new InvalidOperationException(
+                "stop_process requires a registered native application (resourceId or alias).");
+
+        AddLog(job, $"Stopping process {processId} (app: {app.Name})");
+        await db.SaveChangesAsync(ct);
+        return await desktopAwarenessService.StopProcessAsync(processId, force, app, ct);
+    }
+
+    private async Task<NativeApplicationDB?> ResolveNativeAppByAlias(
+        Dictionary<string, object?>? parameters, CancellationToken ct)
+    {
+        var alias = GetString(parameters, "alias");
+        if (!string.IsNullOrWhiteSpace(alias))
+            return await nativeApplicationService.ResolveAsync(alias, ct);
+        return null;
+    }
+
+    private WindowTargetPayload ParseWindowTarget(AgentJobDB job)
+    {
+        var parameters = ParsePayload(job);
+        return new WindowTargetPayload
+        {
+            ProcessId = GetInt(parameters, "processId"),
+            ProcessName = GetString(parameters, "processName"),
+            TitleContains = GetString(parameters, "titleContains"),
+        };
+    }
+
+    private Dictionary<string, object?>? ParsePayload(AgentJobDB job)
+    {
+        if (string.IsNullOrWhiteSpace(job.ScriptJson))
+            return null;
+        return JsonSerializer.Deserialize<Dictionary<string, object?>>(
+            job.ScriptJson, _payloadJsonOptions);
+    }
+
+    private static string? GetString(Dictionary<string, object?>? p, string key) =>
+        p?.GetValueOrDefault(key)?.ToString();
+
+    private static int? GetInt(Dictionary<string, object?>? p, string key)
+    {
+        var val = p?.GetValueOrDefault(key);
+        return val switch
+        {
+            JsonElement je when je.ValueKind == JsonValueKind.Number => je.GetInt32(),
+            _ when val is not null && int.TryParse(val.ToString(), out var i) => i,
+            _ => null,
+        };
+    }
+
+    private static bool? GetBool(Dictionary<string, object?>? p, string key)
+    {
+        var val = p?.GetValueOrDefault(key);
+        return val switch
+        {
+            JsonElement je when je.ValueKind == JsonValueKind.True => true,
+            JsonElement je when je.ValueKind == JsonValueKind.False => false,
+            _ when val is not null && bool.TryParse(val.ToString(), out var b) => b,
+            _ => null,
+        };
+    }
+
+    // ── Spreadsheet data extraction helpers ───────────────────────
+
+    private static JsonElement ExtractJsonData(Dictionary<string, object?>? parameters)
+    {
+        if (parameters?.GetValueOrDefault("data") is JsonElement je)
+            return je;
+
+        var dataStr = parameters?.GetValueOrDefault("data")?.ToString();
+        if (dataStr is not null)
+            return JsonDocument.Parse(dataStr).RootElement;
+
+        throw new InvalidOperationException(
+            "Spreadsheet write requires a 'data' parameter.");
+    }
+
+    private static JsonElement? ExtractJsonDataOrNull(Dictionary<string, object?>? parameters)
+    {
+        if (parameters?.GetValueOrDefault("data") is JsonElement je)
+            return je;
+
+        var dataStr = parameters?.GetValueOrDefault("data")?.ToString();
+        if (dataStr is not null)
+            return JsonDocument.Parse(dataStr).RootElement;
+
+        return null;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
     // Permission dispatch
     // ═══════════════════════════════════════════════════════════════
 
@@ -2073,8 +3036,8 @@ IConfiguration configuration)
                 => actions.CreateSubAgentAsync(agentId, caller, ct: ct),
             AgentActionType.CreateContainer
                 => actions.CreateContainerAsync(agentId, caller, ct: ct),
-            AgentActionType.RegisterInfoStore
-                => actions.RegisterInfoStoreAsync(agentId, caller, ct: ct),
+            AgentActionType.RegisterDatabase
+                => actions.RegisterDatabaseAsync(agentId, caller, ct: ct),
             AgentActionType.AccessLocalhostInBrowser
                 => actions.AccessLocalhostInBrowserAsync(agentId, caller, ct: ct),
             AgentActionType.AccessLocalhostCli
@@ -2087,10 +3050,10 @@ IConfiguration configuration)
                 => actions.UnsafeExecuteAsDangerousShellAsync(agentId, resourceId.Value, caller, ct: ct),
             AgentActionType.ExecuteAsSafeShell when resourceId.HasValue
                 => actions.ExecuteAsSafeShellAsync(agentId, resourceId.Value, caller, ct: ct),
-            AgentActionType.AccessLocalInfoStore when resourceId.HasValue
-                => actions.AccessLocalInfoStoreAsync(agentId, resourceId.Value, caller, ct: ct),
-            AgentActionType.AccessExternalInfoStore when resourceId.HasValue
-                => actions.AccessExternalInfoStoreAsync(agentId, resourceId.Value, caller, ct: ct),
+            AgentActionType.AccessInternalDatabases when resourceId.HasValue
+                => actions.AccessInternalDatabaseAsync(agentId, resourceId.Value, caller, ct: ct),
+            AgentActionType.AccessExternalDatabase when resourceId.HasValue
+                => actions.AccessExternalDatabaseAsync(agentId, resourceId.Value, caller, ct: ct),
             AgentActionType.AccessWebsite when resourceId.HasValue
                 => actions.AccessWebsiteAsync(agentId, resourceId.Value, caller, ct: ct),
             AgentActionType.QuerySearchEngine when resourceId.HasValue
@@ -2124,6 +3087,23 @@ IConfiguration configuration)
                 => actions.AccessEditorSessionAsync(agentId, resourceId.Value, caller, ct: ct),
             AgentActionType.SendBotMessage when resourceId.HasValue
                 => actions.AccessBotIntegrationAsync(agentId, resourceId.Value, caller, ct: ct),
+            AgentActionType.CreateDocumentSession
+                => actions.CreateDocumentSessionAsync(agentId, caller, ct: ct),
+            AgentActionType.SpreadsheetReadRange or
+            AgentActionType.SpreadsheetWriteRange or
+            AgentActionType.SpreadsheetListSheets or
+            AgentActionType.SpreadsheetCreateSheet or
+            AgentActionType.SpreadsheetDeleteSheet or
+            AgentActionType.SpreadsheetGetInfo or
+            AgentActionType.SpreadsheetLiveReadRange or
+            AgentActionType.SpreadsheetLiveWriteRange when resourceId.HasValue
+                => actions.AccessDocumentSessionAsync(agentId, resourceId.Value, caller, ct: ct),
+            AgentActionType.SpreadsheetCreateWorkbook
+                => actions.CreateDocumentSessionAsync(agentId, caller, ct: ct),
+            AgentActionType.EnumerateWindows
+                => actions.EnumerateWindowsAsync(agentId, caller, ct: ct),
+            AgentActionType.LaunchNativeApplication when resourceId.HasValue
+                => actions.LaunchNativeApplicationAsync(agentId, resourceId.Value, caller, ct: ct),
             _ when IsPerResourceAction(actionType) && !resourceId.HasValue
                 => Task.FromResult(AgentActionResult.Denied($"ResourceId is required for {actionType}.")),
             _ => Task.FromResult(AgentActionResult.Denied($"Unknown action type: {actionType}."))
@@ -2133,8 +3113,8 @@ IConfiguration configuration)
     private static bool IsPerResourceAction(AgentActionType type) =>
         type is AgentActionType.UnsafeExecuteAsDangerousShell
             or AgentActionType.ExecuteAsSafeShell
-            or AgentActionType.AccessLocalInfoStore
-            or AgentActionType.AccessExternalInfoStore
+            or AgentActionType.AccessInternalDatabases
+            or AgentActionType.AccessExternalDatabase
             or AgentActionType.AccessWebsite
             or AgentActionType.QuerySearchEngine
             or AgentActionType.AccessContainer
@@ -2155,7 +3135,16 @@ IConfiguration configuration)
             or AgentActionType.EditorShowDiff
             or AgentActionType.EditorRunBuild
             or AgentActionType.EditorRunTerminal
-            or AgentActionType.SendBotMessage;
+            or AgentActionType.SendBotMessage
+            or AgentActionType.SpreadsheetReadRange
+            or AgentActionType.SpreadsheetWriteRange
+            or AgentActionType.SpreadsheetListSheets
+            or AgentActionType.SpreadsheetCreateSheet
+            or AgentActionType.SpreadsheetDeleteSheet
+            or AgentActionType.SpreadsheetGetInfo
+            or AgentActionType.SpreadsheetLiveReadRange
+            or AgentActionType.SpreadsheetLiveWriteRange
+            or AgentActionType.LaunchNativeApplication;
 
     // ═══════════════════════════════════════════════════════════════
     // Default resource resolution
@@ -2214,8 +3203,8 @@ IConfiguration configuration)
             .Where(p => permissionSetIds.Contains(p.Id))
             .Include(p => p.DefaultDangerousShellAccess)
             .Include(p => p.DefaultSafeShellAccess)
-            .Include(p => p.DefaultLocalInfoStorePermission)
-            .Include(p => p.DefaultExternalInfoStorePermission)
+            .Include(p => p.DefaultInternalDatabaseAccess)
+            .Include(p => p.DefaultExternalDatabaseAccess)
             .Include(p => p.DefaultWebsiteAccess)
             .Include(p => p.DefaultSearchEngineAccess)
             .Include(p => p.DefaultContainerAccess)
@@ -2226,6 +3215,8 @@ IConfiguration configuration)
             .Include(p => p.DefaultTaskPermission)
             .Include(p => p.DefaultSkillPermission)
             .Include(p => p.DefaultBotIntegrationAccess)
+            .Include(p => p.DefaultDocumentSessionAccess)
+            .Include(p => p.DefaultNativeApplicationAccess)
             .ToListAsync(ct);
 
         foreach (var psId in permissionSetIds)
@@ -2267,8 +3258,8 @@ IConfiguration configuration)
     {
         AgentActionType.UnsafeExecuteAsDangerousShell => drs.DangerousShellResourceId,
         AgentActionType.ExecuteAsSafeShell => drs.SafeShellResourceId,
-        AgentActionType.AccessLocalInfoStore => drs.LocalInfoStoreResourceId,
-        AgentActionType.AccessExternalInfoStore => drs.ExternalInfoStoreResourceId,
+        AgentActionType.AccessInternalDatabases => drs.InternalDatabaseResourceId,
+        AgentActionType.AccessExternalDatabase => drs.ExternalDatabaseResourceId,
         AgentActionType.AccessWebsite => drs.WebsiteResourceId,
         AgentActionType.QuerySearchEngine => drs.SearchEngineResourceId,
         AgentActionType.AccessContainer => drs.ContainerResourceId,
@@ -2292,6 +3283,15 @@ IConfiguration configuration)
         AgentActionType.EditorRunBuild or
         AgentActionType.EditorRunTerminal => drs.EditorSessionResourceId,
         AgentActionType.SendBotMessage => drs.BotIntegrationResourceId,
+        AgentActionType.SpreadsheetReadRange or
+        AgentActionType.SpreadsheetWriteRange or
+        AgentActionType.SpreadsheetListSheets or
+        AgentActionType.SpreadsheetCreateSheet or
+        AgentActionType.SpreadsheetDeleteSheet or
+        AgentActionType.SpreadsheetGetInfo or
+        AgentActionType.SpreadsheetLiveReadRange or
+        AgentActionType.SpreadsheetLiveWriteRange => drs.DocumentSessionResourceId,
+        AgentActionType.LaunchNativeApplication => drs.NativeApplicationResourceId,
         _ => null,
     };
 
@@ -2306,10 +3306,10 @@ IConfiguration configuration)
             => permissionSet.DefaultDangerousShellAccess?.SystemUserId,
         AgentActionType.ExecuteAsSafeShell
             => permissionSet.DefaultSafeShellAccess?.ContainerId,
-        AgentActionType.AccessLocalInfoStore
-            => permissionSet.DefaultLocalInfoStorePermission?.LocalInformationStoreId,
-        AgentActionType.AccessExternalInfoStore
-            => permissionSet.DefaultExternalInfoStorePermission?.ExternalInformationStoreId,
+        AgentActionType.AccessInternalDatabases
+            => permissionSet.DefaultInternalDatabaseAccess?.InternalDatabaseId,
+        AgentActionType.AccessExternalDatabase
+            => permissionSet.DefaultExternalDatabaseAccess?.ExternalDatabaseId,
         AgentActionType.AccessWebsite
             => permissionSet.DefaultWebsiteAccess?.WebsiteId,
         AgentActionType.QuerySearchEngine
@@ -2343,6 +3343,17 @@ IConfiguration configuration)
             => permissionSet.DefaultEditorSessionAccess?.EditorSessionId,
         AgentActionType.SendBotMessage
             => permissionSet.DefaultBotIntegrationAccess?.BotIntegrationId,
+        AgentActionType.SpreadsheetReadRange or
+        AgentActionType.SpreadsheetWriteRange or
+        AgentActionType.SpreadsheetListSheets or
+        AgentActionType.SpreadsheetCreateSheet or
+        AgentActionType.SpreadsheetDeleteSheet or
+        AgentActionType.SpreadsheetGetInfo or
+        AgentActionType.SpreadsheetLiveReadRange or
+        AgentActionType.SpreadsheetLiveWriteRange
+            => permissionSet.DefaultDocumentSessionAccess?.DocumentSessionId,
+        AgentActionType.LaunchNativeApplication
+            => permissionSet.DefaultNativeApplicationAccess?.NativeApplicationId,
         _ => null,
     };
 
@@ -2446,7 +3457,7 @@ IConfiguration configuration)
         // ── Global flags ──────────────────────────────────────────
         AgentActionType.CreateSubAgent    => ps.CanCreateSubAgents,
         AgentActionType.CreateContainer   => ps.CanCreateContainers,
-        AgentActionType.RegisterInfoStore => ps.CanRegisterInfoStores,
+        AgentActionType.RegisterDatabase => ps.CanRegisterDatabases,
         AgentActionType.AccessLocalhostInBrowser => ps.CanAccessLocalhostInBrowser,
         AgentActionType.AccessLocalhostCli       => ps.CanAccessLocalhostCli,
 
@@ -2459,13 +3470,13 @@ IConfiguration configuration)
             => ps.SafeShellAccesses.Any(a =>
                 a.ContainerId == resourceId || a.ContainerId == WellKnownIds.AllResources),
 
-        AgentActionType.AccessLocalInfoStore when resourceId.HasValue
-            => ps.LocalInfoStorePermissions.Any(a =>
-                a.LocalInformationStoreId == resourceId || a.LocalInformationStoreId == WellKnownIds.AllResources),
+        AgentActionType.AccessInternalDatabases when resourceId.HasValue
+            => ps.InternalDatabaseAccesses.Any(a =>
+                a.InternalDatabaseId == resourceId || a.InternalDatabaseId == WellKnownIds.AllResources),
 
-        AgentActionType.AccessExternalInfoStore when resourceId.HasValue
-            => ps.ExternalInfoStorePermissions.Any(a =>
-                a.ExternalInformationStoreId == resourceId || a.ExternalInformationStoreId == WellKnownIds.AllResources),
+        AgentActionType.AccessExternalDatabase when resourceId.HasValue
+            => ps.ExternalDatabaseAccesses.Any(a =>
+                a.ExternalDatabaseId == resourceId || a.ExternalDatabaseId == WellKnownIds.AllResources),
 
         AgentActionType.AccessWebsite when resourceId.HasValue
             => ps.WebsiteAccesses.Any(a =>
