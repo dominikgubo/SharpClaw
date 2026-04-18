@@ -28,6 +28,13 @@ internal sealed class PermissionEditorBuilder
     private bool _grantClearance = true;
     private bool _useAutoSuggest;
 
+    /// <summary>
+    /// Optional callback invoked whenever the user manually edits a permission
+    /// (unchecks a flag, removes a grant row, etc.). Used by callers to reset
+    /// "grant all" state.
+    /// </summary>
+    private Action? _onManualEdit;
+
     // ── State (populated during Build*, read during Collect*) ────
     private readonly Dictionary<string, (CheckBox Check, ComboBox? Clearance)> _flagEditors = new(7);
     private readonly Dictionary<string, StackPanel> _grantPanels = new(13);
@@ -57,6 +64,10 @@ internal sealed class PermissionEditorBuilder
     /// <summary>Use <see cref="AutoSuggestBox"/> instead of <see cref="ComboBox"/> for adding resources.</summary>
     public PermissionEditorBuilder WithAutoSuggestBox(bool enabled)
     { _useAutoSuggest = enabled; return this; }
+
+    /// <summary>Register a callback invoked when the user manually edits any permission.</summary>
+    public PermissionEditorBuilder WithManualEditCallback(Action? callback)
+    { _onManualEdit = callback; return this; }
 
     // ── Build methods ────────────────────────────────────────────
 
@@ -99,6 +110,7 @@ internal sealed class PermissionEditorBuilder
                     Foreground = TerminalUI.Brush(0xE0E0E0),
                 },
             };
+            cb.Unchecked += (_, _) => _onManualEdit?.Invoke();
             if (TerminalUI.GlobalFlagTooltips.TryGetValue(flag, out var tip))
                 ToolTipService.SetToolTip(cb, tip);
 
@@ -299,7 +311,11 @@ internal sealed class PermissionEditorBuilder
             row.Children.Add(TerminalUI.MakeClearanceCombo(clearance));
         }
 
-        var rm = TerminalUI.RemoveButton(() => panel.Children.Remove(row));
+        var rm = TerminalUI.RemoveButton(() =>
+        {
+            panel.Children.Remove(row);
+            _onManualEdit?.Invoke();
+        });
         rm.Padding = new Thickness(2);
         if (rm.Content is TextBlock rmTb) rmTb.FontSize = 9;
         row.Children.Add(rm);
@@ -467,15 +483,6 @@ internal sealed class PermissionEditorBuilder
         _resourcesByType.Clear();
         await PreloadResourceNamesAsync();
 
-        JsonElement? existingFlags = _existing is { } ex
-            && ex.TryGetProperty("globalFlags", out var ef) ? ef : null;
-        JsonElement? callerFlags = _callerFilter is { } cf
-            && cf.TryGetProperty("globalFlags", out var cff) ? cff : null;
-        JsonElement? existingGrants = _existing is { } exg
-            && exg.TryGetProperty("resourceGrants", out var eg) ? eg : null;
-        JsonElement? callerGrants = _callerFilter is { } cfg
-            && cfg.TryGetProperty("resourceGrants", out var cg) ? cg : null;
-
         var sorted = TerminalUI.TopologicalSort(metadata);
 
         foreach (var module in sorted)
@@ -494,115 +501,199 @@ internal sealed class PermissionEditorBuilder
             };
             container.Children.Add(header);
 
-            // ── Global flags for this module ──
-            if (module.GlobalFlags.Count > 0)
+            BuildSingleModule(container, module);
+        }
+    }
+
+    // ── Single-module build ──────────────────────────────────────
+
+    /// <summary>
+    /// Ensures resource name caches are populated.
+    /// Call once before using <see cref="BuildSingleModule"/>.
+    /// </summary>
+    public async Task EnsureResourcesLoadedAsync()
+    {
+        if (_resourcesByType.Count == 0)
+            await PreloadResourceNamesAsync();
+    }
+
+    /// <summary>
+    /// Builds a single module's global flags and resource grants into
+    /// <paramref name="container"/>.
+    /// </summary>
+    public void BuildSingleModule(StackPanel container, ModulePermissionMetadata module)
+    {
+        JsonElement? existingFlags = _existing is { } ex
+            && ex.TryGetProperty("globalFlags", out var ef) ? ef : null;
+        JsonElement? callerFlags = _callerFilter is { } cf
+            && cf.TryGetProperty("globalFlags", out var cff) ? cff : null;
+        JsonElement? existingGrants = _existing is { } exg
+            && exg.TryGetProperty("resourceGrants", out var eg) ? eg : null;
+        JsonElement? callerGrants = _callerFilter is { } cfg
+            && cfg.TryGetProperty("resourceGrants", out var cg) ? cg : null;
+
+        // ── Global flags for this module ──
+        if (module.GlobalFlags.Count > 0)
+        {
+            var flagPanel = new StackPanel { Spacing = _flagClearance ? 10 : 4, Margin = new Thickness(8, 0, 0, 0) };
+
+            foreach (var flag in module.GlobalFlags)
             {
-                var flagPanel = new StackPanel { Spacing = _flagClearance ? 10 : 4, Margin = new Thickness(8, 0, 0, 0) };
-
-                foreach (var flag in module.GlobalFlags)
+                if (_callerFilter is not null)
                 {
-                    if (_callerFilter is not null)
-                    {
-                        if (callerFlags is null || !callerFlags.Value.TryGetProperty(flag.FlagKey, out _))
-                            continue;
-                    }
-
-                    var on = existingFlags is { } ef2 && ef2.TryGetProperty(flag.FlagKey, out _);
-                    var cb = new CheckBox
-                    {
-                        IsChecked = on, MinWidth = 0, MinHeight = 0,
-                        Padding = new Thickness(4, 0, 0, 0),
-                        Content = new TextBlock
-                        {
-                            Text = flag.DisplayName,
-                            FontFamily = TerminalUI.Mono, FontSize = 11,
-                            Foreground = TerminalUI.Brush(0xE0E0E0),
-                        },
-                    };
-                    if (!string.IsNullOrEmpty(flag.Description))
-                        ToolTipService.SetToolTip(cb, flag.Description);
-
-                    ComboBox? clrBox = null;
-                    if (_flagClearance)
-                    {
-                        var cl = existingFlags is { } ef3
-                            && ef3.TryGetProperty(flag.FlagKey, out var clrProp)
-                                ? clrProp.GetString() ?? "Unset" : "Unset";
-
-                        var row = new StackPanel { Spacing = 4 };
-                        row.Children.Add(cb);
-                        row.Children.Add(new TextBlock
-                        {
-                            Text = "Clearance:", FontFamily = TerminalUI.Mono, FontSize = 9,
-                            Foreground = TerminalUI.Brush(0x808080), Margin = new Thickness(24, 2, 0, 0),
-                        });
-                        clrBox = TerminalUI.MakeClearanceCombo(cl, includeUnset: true);
-                        clrBox.Margin = new Thickness(24, 0, 0, 0);
-                        row.Children.Add(clrBox);
-                        flagPanel.Children.Add(row);
-                    }
-                    else
-                    {
-                        flagPanel.Children.Add(cb);
-                    }
-
-                    _flagEditors[flag.FlagKey] = (cb, clrBox);
-                }
-
-                if (flagPanel.Children.Count > 0)
-                    container.Children.Add(flagPanel);
-            }
-
-            // ── Resource types for this module ──
-            if (module.ResourceTypes.Count > 0)
-            {
-                var resCont = new StackPanel { Spacing = _grantClearance ? 10 : 6, Margin = new Thickness(8, 4, 0, 0) };
-
-                foreach (var resType in module.ResourceTypes)
-                {
-                    var callerIds = GetCallerResourceIds(callerGrants, resType.ResourceType);
-                    if (_callerFilter is not null && callerIds is null)
+                    if (callerFlags is null || !callerFlags.Value.TryGetProperty(flag.FlagKey, out _))
                         continue;
-
-                    var section = new StackPanel { Spacing = _grantClearance ? 4 : 2 };
-                    var resHeader = new TextBlock
-                    {
-                        Text = resType.DisplayName, FontFamily = TerminalUI.Mono, FontSize = 11,
-                        Foreground = TerminalUI.Brush(0x00CCFF),
-                    };
-                    if (TerminalUI.ResourceAccessTooltips.TryGetValue(resType.ResourceType, out var resTip))
-                        ToolTipService.SetToolTip(resHeader, resTip);
-                    section.Children.Add(resHeader);
-
-                    var gp = new StackPanel { Spacing = _grantClearance ? 6 : 2, Margin = new Thickness(12, 0, 0, 0) };
-                    _grantPanels[resType.ResourceType] = gp;
-
-                    if (existingGrants is { } eg2
-                        && eg2.TryGetProperty(resType.ResourceType, out var ap) && ap.ValueKind == JsonValueKind.Array)
-                        foreach (var g in ap.EnumerateArray())
-                            if (g.TryGetProperty("resourceId", out var rid) && rid.ValueKind == JsonValueKind.String)
-                            {
-                                var cl = g.TryGetProperty("clearance", out var clp) ? clp.GetString() ?? "Independent" : "Independent";
-                                AddGrantRow(gp, rid.GetGuid(), cl);
-                            }
-
-                    section.Children.Add(gp);
-
-                    var capturedApi = resType.ResourceType;
-                    var actionsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
-
-                    if (_useAutoSuggest)
-                        BuildAutoSuggestSelector(actionsRow, capturedApi, resType.ResourceType);
-                    else
-                        BuildComboSelector(actionsRow, capturedApi, callerIds);
-
-                    section.Children.Add(actionsRow);
-                    resCont.Children.Add(section);
                 }
 
-                if (resCont.Children.Count > 0)
-                    container.Children.Add(resCont);
+                var on = existingFlags is { } ef2 && ef2.TryGetProperty(flag.FlagKey, out _);
+                var cb = new CheckBox
+                {
+                    IsChecked = on, MinWidth = 0, MinHeight = 0,
+                    Padding = new Thickness(4, 0, 0, 0),
+                    Content = new TextBlock
+                    {
+                        Text = flag.DisplayName,
+                        FontFamily = TerminalUI.Mono, FontSize = 11,
+                        Foreground = TerminalUI.Brush(0xE0E0E0),
+                    },
+                };
+                cb.Unchecked += (_, _) => _onManualEdit?.Invoke();
+                if (!string.IsNullOrEmpty(flag.Description))
+                    ToolTipService.SetToolTip(cb, flag.Description);
+
+                ComboBox? clrBox = null;
+                if (_flagClearance)
+                {
+                    var cl = existingFlags is { } ef3
+                        && ef3.TryGetProperty(flag.FlagKey, out var clrProp)
+                            ? clrProp.GetString() ?? "Unset" : "Unset";
+
+                    var row = new StackPanel { Spacing = 4 };
+                    row.Children.Add(cb);
+                    row.Children.Add(new TextBlock
+                    {
+                        Text = "Clearance:", FontFamily = TerminalUI.Mono, FontSize = 9,
+                        Foreground = TerminalUI.Brush(0x808080), Margin = new Thickness(24, 2, 0, 0),
+                    });
+                    clrBox = TerminalUI.MakeClearanceCombo(cl, includeUnset: true);
+                    clrBox.Margin = new Thickness(24, 0, 0, 0);
+                    row.Children.Add(clrBox);
+                    flagPanel.Children.Add(row);
+                }
+                else
+                {
+                    flagPanel.Children.Add(cb);
+                }
+
+                _flagEditors[flag.FlagKey] = (cb, clrBox);
             }
+
+            if (flagPanel.Children.Count > 0)
+                container.Children.Add(flagPanel);
+        }
+
+        // ── Resource types for this module ──
+        if (module.ResourceTypes.Count > 0)
+        {
+            var resCont = new StackPanel { Spacing = _grantClearance ? 10 : 6, Margin = new Thickness(8, 4, 0, 0) };
+
+            foreach (var resType in module.ResourceTypes)
+            {
+                var callerIds = GetCallerResourceIds(callerGrants, resType.ResourceType);
+                if (_callerFilter is not null && callerIds is null)
+                    continue;
+
+                var section = new StackPanel { Spacing = _grantClearance ? 4 : 2 };
+                var resHeader = new TextBlock
+                {
+                    Text = resType.DisplayName, FontFamily = TerminalUI.Mono, FontSize = 11,
+                    Foreground = TerminalUI.Brush(0x00CCFF),
+                };
+                if (TerminalUI.ResourceAccessTooltips.TryGetValue(resType.ResourceType, out var resTip))
+                    ToolTipService.SetToolTip(resHeader, resTip);
+                section.Children.Add(resHeader);
+
+                var gp = new StackPanel { Spacing = _grantClearance ? 6 : 2, Margin = new Thickness(12, 0, 0, 0) };
+                _grantPanels[resType.ResourceType] = gp;
+
+                if (existingGrants is { } eg2
+                    && eg2.TryGetProperty(resType.ResourceType, out var ap) && ap.ValueKind == JsonValueKind.Array)
+                    foreach (var g in ap.EnumerateArray())
+                        if (g.TryGetProperty("resourceId", out var rid) && rid.ValueKind == JsonValueKind.String)
+                        {
+                            var cl = g.TryGetProperty("clearance", out var clp) ? clp.GetString() ?? "Independent" : "Independent";
+                            AddGrantRow(gp, rid.GetGuid(), cl);
+                        }
+
+                section.Children.Add(gp);
+
+                var capturedApi = resType.ResourceType;
+                var actionsRow = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8 };
+
+                if (_useAutoSuggest)
+                    BuildAutoSuggestSelector(actionsRow, capturedApi, resType.ResourceType);
+                else
+                    BuildComboSelector(actionsRow, capturedApi, callerIds);
+
+                section.Children.Add(actionsRow);
+                resCont.Children.Add(section);
+            }
+
+            if (resCont.Children.Count > 0)
+                container.Children.Add(resCont);
+        }
+    }
+
+    /// <summary>
+    /// Removes tracked editors for the given module's flags and resource types.
+    /// Call when the user disables a module so <see cref="CollectAll"/> excludes it.
+    /// </summary>
+    public void ClearModuleEntries(ModulePermissionMetadata module)
+    {
+        foreach (var flag in module.GlobalFlags)
+            _flagEditors.Remove(flag.FlagKey);
+        foreach (var res in module.ResourceTypes)
+            _grantPanels.Remove(res.ResourceType);
+    }
+
+    /// <summary>
+    /// Checks all global-flag checkboxes for the given module and sets their
+    /// clearance to "Independent".
+    /// </summary>
+    public void CheckAllFlags(ModulePermissionMetadata module)
+    {
+        foreach (var flag in module.GlobalFlags)
+        {
+            if (!_flagEditors.TryGetValue(flag.FlagKey, out var entry)) continue;
+            entry.Check.IsChecked = true;
+            if (entry.Clearance is { } clr)
+            {
+                for (var i = 0; i < clr.Items.Count; i++)
+                    if (clr.Items[i] is ComboBoxItem { Tag: "Independent" })
+                    { clr.SelectedIndex = i; break; }
+            }
+        }
+    }
+
+    /// <summary>
+    /// Ensures every resource type in the given module has at least a wildcard
+    /// (<c>AllResources</c>) grant row. Existing rows are not duplicated.
+    /// </summary>
+    public void EnsureWildcardGrants(ModulePermissionMetadata module)
+    {
+        foreach (var resType in module.ResourceTypes)
+        {
+            if (!_grantPanels.TryGetValue(resType.ResourceType, out var panel)) continue;
+
+            // Check if wildcard already present
+            var hasWildcard = false;
+            foreach (var child in panel.Children)
+                if (child is StackPanel row && row.Children.Count > 0
+                    && row.Children[0] is TextBlock { Tag: Guid id } && id == TerminalUI.AllResourcesId)
+                { hasWildcard = true; break; }
+
+            if (!hasWildcard)
+                AddGrantRow(panel, TerminalUI.AllResourcesId, "Independent");
         }
     }
 }

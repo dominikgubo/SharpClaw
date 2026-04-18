@@ -74,8 +74,17 @@ public sealed partial class SettingsPage : Page
     /// </summary>
     private static readonly Dictionary<string, string> TabRequiredModules = new()
     {
-        ["Sound Input"]      = "sharpclaw_transcription",
-        ["Bot Integrations"] = "sharpclaw_bot_integration",
+        ["Containers"]          = "sharpclaw_mk8shell",
+        ["Websites"]            = "sharpclaw_web_access",
+        ["Search Engines"]      = "sharpclaw_web_access",
+        ["Internal Databases"]  = "sharpclaw_database_access",
+        ["External Databases"]  = "sharpclaw_database_access",
+        ["Sound Input"]         = "sharpclaw_transcription",
+        ["Display Devices"]     = "sharpclaw_computer_use",
+        ["Native Applications"] = "sharpclaw_computer_use",
+        ["Editor Sessions"]     = "sharpclaw_editor_common",
+        ["Documents"]           = "sharpclaw_office_apps",
+        ["Bot Integrations"]    = "sharpclaw_bot_integration",
     };
 
     private void BuildTabs()
@@ -87,8 +96,17 @@ public sealed partial class SettingsPage : Page
         AddTabSection("Agents");
         AddTabButton("Agents", "sharpclaw agent list");
         AddTabButton("Roles", "sharpclaw role list");
-        AddTabSection("Audio");
+        AddTabSection("Resources");
+        AddConditionalTabButton("Containers", "sharpclaw resource container list");
+        AddConditionalTabButton("Websites", "sharpclaw resource website list");
+        AddConditionalTabButton("Search Engines", "sharpclaw resource searchengine list");
+        AddConditionalTabButton("Internal Databases", "sharpclaw resource internaldatabase list");
+        AddConditionalTabButton("External Databases", "sharpclaw resource externaldatabase list");
         AddConditionalTabButton("Sound Input", "sharpclaw resource inputaudio list");
+        AddConditionalTabButton("Display Devices", "sharpclaw resource displaydevice list");
+        AddConditionalTabButton("Native Applications", "sharpclaw resource nativeapp list");
+        AddConditionalTabButton("Editor Sessions", "sharpclaw resource editorsession list");
+        AddConditionalTabButton("Documents", "sharpclaw resource document list");
         AddTabSection("Gateway");
         AddTabButton("Gateway", "sharpclaw gateway status");
         AddConditionalTabButton("Bot Integrations", "sharpclaw bot list");
@@ -175,7 +193,16 @@ public sealed partial class SettingsPage : Page
             "Models" => LoadModelsAsync(),
             "Agents" => LoadAgentsAsync(),
             "Roles" => LoadRolesListAsync(),
+            "Containers" => LoadGenericResourceAsync("Containers", "Sandboxed environments for shell execution.", "/resources/containers", hasSync: true),
+            "Websites" => LoadGenericResourceAsync("Websites", "Allowed websites for web browsing tools.", "/resources/websites"),
+            "Search Engines" => LoadGenericResourceAsync("Search Engines", "Search engines available for web search tools.", "/searchengines"),
+            "Internal Databases" => LoadGenericResourceAsync("Internal Databases", "Local information stores for knowledge retrieval.", "/resources/internaldatabases"),
+            "External Databases" => LoadGenericResourceAsync("External Databases", "External database connections for data access.", "/resources/externaldatabases"),
             "Sound Input" => LoadSoundInputAsync(),
+            "Display Devices" => LoadGenericResourceAsync("Display Devices", "Display devices for screen capture and interaction.", "/resources/displaydevices", hasSync: true),
+            "Native Applications" => LoadGenericResourceAsync("Native Applications", "Registered native applications for automation.", "/resources/nativeapplications"),
+            "Editor Sessions" => LoadGenericResourceAsync("Editor Sessions", "Active editor bridge connections.", "/resources/editorsessions"),
+            "Documents" => LoadGenericResourceAsync("Documents", "Document sessions for office automation.", "/resources/documents"),
             "Gateway" => LoadGatewayAsync(),
             "Bot Integrations" => LoadBotIntegrationsAsync(),
             "Users" => LoadUsersAsync(),
@@ -631,6 +658,105 @@ public sealed partial class SettingsPage : Page
         };
         ContentPanel.Children.Add(roleBox);
         ContentPanel.Children.Add(assignBtn);
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // GENERIC RESOURCE LIST
+    // ═══════════════════════════════════════════════════════════════
+
+    private async Task LoadGenericResourceAsync(string title, string description, string apiPath, bool hasSync = false)
+    {
+        ContentPanel.Children.Clear();
+        H(title);
+        Lbl(description, 0x808080);
+
+        if (hasSync)
+        {
+            var syncBtn = GreenButton("↻ Sync");
+            syncBtn.Click += async (_, _) =>
+            {
+                syncBtn.IsEnabled = false;
+                try
+                {
+                    var resp = await Api.PostAsync($"{apiPath}/sync", null);
+                    if (resp.IsSuccessStatusCode)
+                    {
+                        Status("✓ Synced.", 0x00FF00);
+                        await LoadGenericResourceAsync(title, description, apiPath, hasSync);
+                    }
+                    else Status("✗ Sync failed.", 0xFF4444);
+                }
+                catch (Exception ex) { Status($"✗ {ex.Message}", 0xFF4444); }
+                finally { syncBtn.IsEnabled = true; }
+            };
+            ContentPanel.Children.Add(syncBtn);
+        }
+
+        try
+        {
+            using var resp = await Api.GetAsync(apiPath);
+            if (!resp.IsSuccessStatusCode)
+            {
+                Status($"Failed to load: {(int)resp.StatusCode}", 0xFF4444);
+                return;
+            }
+
+            using var stream = await resp.Content.ReadAsStreamAsync();
+            using var doc = await JsonDocument.ParseAsync(stream);
+            var items = doc.RootElement;
+
+            if (items.ValueKind != JsonValueKind.Array || items.GetArrayLength() == 0)
+            {
+                Lbl("No items found.", 0x808080);
+                return;
+            }
+
+            Sub($"{items.GetArrayLength()} item(s)");
+            var list = new StackPanel { Spacing = 2 };
+
+            foreach (var item in items.EnumerateArray())
+            {
+                var name = item.TryGetProperty("name", out var n) && n.ValueKind == JsonValueKind.String
+                    ? n.GetString()
+                    : item.TryGetProperty("title", out var t) && t.ValueKind == JsonValueKind.String
+                        ? t.GetString()
+                        : null;
+                var id = item.TryGetProperty("id", out var idProp) && idProp.ValueKind == JsonValueKind.String
+                    ? idProp.GetString()
+                    : null;
+
+                var idShort = id is { Length: >= 8 } ? id[..8] + "…" : id;
+
+                var capturedApiPath = apiPath;
+                var capturedId = id;
+                var capturedTitle = title;
+                var capturedDesc = description;
+                var capturedSync = hasSync;
+
+                Func<Task>? onDelete = capturedId is not null
+                    ? async () =>
+                    {
+                        try
+                        {
+                            var delResp = await Api.DeleteAsync($"{capturedApiPath}/{capturedId}");
+                            if (delResp.IsSuccessStatusCode)
+                                await LoadGenericResourceAsync(capturedTitle, capturedDesc, capturedApiPath, capturedSync);
+                            else
+                                Status($"✗ Delete failed: {(int)delResp.StatusCode}", 0xFF4444);
+                        }
+                        catch (Exception ex) { Status($"✗ {ex.Message}", 0xFF4444); }
+                    }
+                    : null;
+
+                list.Children.Add(MakeListRow(name ?? "(unnamed)", idShort, onClick: null, onDelete));
+            }
+
+            ContentPanel.Children.Add(list);
+        }
+        catch (Exception ex)
+        {
+            Status($"✗ {ex.Message}", 0xFF4444);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -2147,7 +2273,21 @@ public sealed partial class SettingsPage : Page
 
         var errors = new List<string>();
 
-        // 1. Stop the backend and gateway processes so files are not locked.
+        // 1. Tell the backend to purge its own Data and Environment directories
+        //    while the process is still running and knows its own paths.
+        try
+        {
+            var api = App.Services?.GetService<SharpClawApiClient>();
+            if (api is not null)
+            {
+                using var resp = await api.PostAsync("/system/factory-reset", null);
+                if (!resp.IsSuccessStatusCode)
+                    errors.Add($"Factory reset API: HTTP {(int)resp.StatusCode}");
+            }
+        }
+        catch (Exception ex) { errors.Add($"Factory reset API: {ex.Message}"); }
+
+        // 2. Stop the backend and gateway processes.
         try
         {
             var gateway = App.Services?.GetService<GatewayProcessManager>();
@@ -2162,35 +2302,29 @@ public sealed partial class SettingsPage : Page
         }
         catch (Exception ex) { errors.Add($"Stop backend: {ex.Message}"); }
 
-        // Wait for processes to fully release file handles.
-        await Task.Delay(2000);
-
-        // 2. Clear frontend-only preferences (client-settings.json) in memory
+        // 3. Clear frontend-only preferences (client-settings.json) in memory
         //    so they are not re-flushed to disk before the directory is deleted.
         try { App.Services?.GetService<ClientSettings>()?.Reset(); }
         catch (Exception ex) { errors.Add($"Client settings: {ex.Message}"); }
 
-        // 2b. Clear saved account store.
+        // 3b. Clear saved account store.
         try { App.Services?.GetService<AccountStore>()?.Reset(); }
         catch (Exception ex) { errors.Add($"Account store: {ex.Message}"); }
 
-        // 3. Delete %LOCALAPPDATA%/SharpClaw (api-key, encryption keys, setup marker,
-        //    client-settings.json).
+        // 4. Clean %LOCALAPPDATA%/SharpClaw — remove user data but preserve
+        //    .api-key and .gateway-token, which belong to the (potentially
+        //    still-running) backend process.  In dev/external mode Stop() is
+        //    a no-op, so the backend keeps its in-memory key; deleting the
+        //    key file would leave the client unable to authenticate.
         var localAppData = Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "SharpClaw");
-        await DeleteWithRetryAsync(localAppData, "LocalAppData", errors);
+        await CleanDirectoryPreservingAuthFilesAsync(localAppData, errors);
 
-        // 4. Delete the backend's Data directory (JSON persistence).
-        //    It lives next to the backend executable or, in dev mode, next
-        //    to the Infrastructure assembly.  We check both the bundled
-        //    location and the common dev-time location.
-        var baseDir = AppContext.BaseDirectory;
-        await DeleteWithRetryAsync(Path.Combine(baseDir, "backend", "Data"), "Data dir", errors);
-        await DeleteWithRetryAsync(Path.Combine(baseDir, "Data"), "Data dir (dev)", errors);
-
-        // 5. Delete the backend's Environment directory (config files).
-        await DeleteWithRetryAsync(Path.Combine(baseDir, "backend", "Environment"), "Backend env", errors);
+        // 5. Invalidate the client's cached API key so the next request
+        //    re-reads from disk (handles both external and bundled restarts).
+        try { App.Services?.GetService<SharpClawApiClient>()?.InvalidateApiKey(); }
+        catch { /* best-effort */ }
 
         // Show result
         ContentPanel.Children.Clear();
@@ -2237,6 +2371,34 @@ public sealed partial class SettingsPage : Page
             {
                 errors.Add($"{label}: {ex.Message}");
             }
+        }
+    }
+
+    /// <summary>
+    /// Removes all files and subdirectories inside <paramref name="path"/>
+    /// except <c>.api-key</c> and <c>.gateway-token</c>, which are owned by
+    /// the backend process and must survive a factory reset so the client can
+    /// re-authenticate against a still-running (external/dev) backend.
+    /// </summary>
+    private static async Task CleanDirectoryPreservingAuthFilesAsync(string path, List<string> errors)
+    {
+        if (!Directory.Exists(path))
+            return;
+
+        HashSet<string> preserve = [".api-key", ".gateway-token"];
+
+        foreach (var file in Directory.EnumerateFiles(path))
+        {
+            if (preserve.Contains(Path.GetFileName(file)))
+                continue;
+
+            try { File.Delete(file); }
+            catch (Exception ex) { errors.Add($"LocalAppData/{Path.GetFileName(file)}: {ex.Message}"); }
+        }
+
+        foreach (var dir in Directory.EnumerateDirectories(path))
+        {
+            await DeleteWithRetryAsync(dir, $"LocalAppData/{Path.GetFileName(dir)}", errors);
         }
     }
 }

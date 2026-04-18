@@ -2,6 +2,9 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.RegularExpressions;
 
+using SharpClaw.Application.Services;
+using SharpClaw.Utils.Security;
+
 namespace SharpClaw.Modules.ModuleDev.Services;
 
 /// <summary>
@@ -28,6 +31,8 @@ internal sealed partial class ModuleBuildService(ModuleWorkspaceService workspac
         string Message);
 
     private static readonly TimeSpan BuildTimeout = TimeSpan.FromSeconds(120);
+    private static readonly HashSet<string> AllowedConfigurations =
+        new(StringComparer.OrdinalIgnoreCase) { "Debug", "Release" };
 
     /// <summary>
     /// Build a module project. Returns structured diagnostics.
@@ -35,7 +40,14 @@ internal sealed partial class ModuleBuildService(ModuleWorkspaceService workspac
     public async Task<BuildResult> BuildAsync(
         string moduleId, string configuration = "Debug", CancellationToken ct = default)
     {
-        var moduleDir = workspace.ResolveModuleDir(moduleId);
+        if (!AllowedConfigurations.Contains(configuration))
+            throw new ArgumentException(
+                $"Invalid build configuration '{configuration}'. Allowed: {string.Join(", ", AllowedConfigurations)}.",
+                nameof(configuration));
+
+        var safeModuleId = EnsureSafeModuleId(moduleId);
+        var moduleDir = PathGuard.EnsureContainedIn(
+            workspace.ResolveModuleDir(safeModuleId), ModuleService.ResolveExternalModulesDir());
 
         if (!Directory.Exists(moduleDir))
             throw new DirectoryNotFoundException($"Module directory not found: {moduleDir}");
@@ -45,14 +57,19 @@ internal sealed partial class ModuleBuildService(ModuleWorkspaceService workspac
         if (csprojFiles.Length == 0)
             throw new FileNotFoundException($"No .csproj found in '{moduleDir}'.");
 
-        var csprojPath = csprojFiles[0];
+        // Extract just the file name from the discovered path, validate it is a plain
+        // name with no traversal, then reconstruct from the trusted moduleDir.
+        // This severs the taint chain so CodeQL sees no user-controlled value reaching Process.Start.
+        var csprojFileName = PathGuard.EnsureFileName(Path.GetFileName(csprojFiles[0]));
+        PathGuard.EnsureExtension(csprojFileName, ".csproj");
+        var csprojPath = Path.GetFullPath(Path.Combine(moduleDir, csprojFileName));
 
         var psi = new ProcessStartInfo
         {
             FileName = "dotnet",
             ArgumentList = { "build", csprojPath, "-c", configuration, "-nologo",
                 "-consoleloggerparameters:NoSummary" },
-            WorkingDirectory = moduleDir,
+            WorkingDirectory = ModuleService.ResolveExternalModulesDir(),
             RedirectStandardOutput = true,
             RedirectStandardError = true,
             UseShellExecute = false,
@@ -112,6 +129,15 @@ internal sealed partial class ModuleBuildService(ModuleWorkspaceService workspac
         return new BuildResult(success, errors, warnings, outputDll, rawOutput);
     }
 
+    private static string EnsureSafeModuleId(string moduleId)
+    {
+        ArgumentException.ThrowIfNullOrWhiteSpace(moduleId, nameof(moduleId));
+        if (!ModuleIdRegex().IsMatch(moduleId))
+            throw new ArgumentException(
+                $"Invalid module ID '{moduleId}'. Must match ^[a-z][a-z0-9_]{{0,39}}$.", nameof(moduleId));
+        return moduleId;
+    }
+
     // ── MSBuild diagnostic parsing ────────────────────────────────
 
     private static IReadOnlyList<BuildDiagnostic> ParseDiagnostics(string output, string severity)
@@ -138,6 +164,9 @@ internal sealed partial class ModuleBuildService(ModuleWorkspaceService workspac
 
         return diagnostics;
     }
+
+    [GeneratedRegex(@"^[a-z][a-z0-9_]{0,39}$")]
+    private static partial Regex ModuleIdRegex();
 
     [GeneratedRegex(@"(?<file>[^(]+)\((?<line>\d+),(?<col>\d+)\):\s+(?<severity>error|warning)\s+(?<code>\w+):\s+(?<msg>.+)")]
     private static partial Regex MsBuildDiagnosticRegex();

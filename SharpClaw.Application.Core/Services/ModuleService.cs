@@ -5,8 +5,11 @@ using Microsoft.Extensions.Logging;
 
 using SharpClaw.Application.Core.Modules;
 using SharpClaw.Application.Infrastructure.Models;
+using SharpClaw.Application.Infrastructure.Models.Access;
+using SharpClaw.Contracts;
 using SharpClaw.Contracts.Modules;
 using SharpClaw.Infrastructure.Persistence;
+using SharpClaw.Utils.Security;
 
 namespace SharpClaw.Application.Services;
 
@@ -190,6 +193,10 @@ public sealed class ModuleService(
                 registry.Unregister(moduleId);
                 throw;
             }
+
+            // Reconcile: backfill wildcard grants for newly registered
+            // resource types and global flags into existing permission sets.
+            await ReconcilePermissionsForModuleAsync(module, ct);
         }
 
         eventDispatcher.InvalidateSinkCache();
@@ -280,25 +287,32 @@ public sealed class ModuleService(
     public async Task<ModuleStateResponse> LoadExternalAsync(
         string moduleDir, IServiceProvider hostServices, CancellationToken ct = default)
     {
-        var manifestPath = Path.Combine(moduleDir, "module.json");
+        // Validate that moduleDir resolves strictly inside the external-modules root.
+        var externalRoot = ResolveExternalModulesDir();
+        var combinedModuleDir = Path.Combine(externalRoot, moduleDir);
+        var canonicalModuleDir = PathGuard.EnsureContainedIn(combinedModuleDir, externalRoot);
+
+        var manifestPath = PathGuard.EnsureContainedIn(
+            Path.Combine(canonicalModuleDir, "module.json"), canonicalModuleDir);
         if (!File.Exists(manifestPath))
-            throw new FileNotFoundException($"No module.json found in '{moduleDir}'.", manifestPath);
+            throw new FileNotFoundException($"No module.json found in '{canonicalModuleDir}'.", manifestPath);
 
         var json = await File.ReadAllTextAsync(manifestPath, ct);
         var manifest = System.Text.Json.JsonSerializer.Deserialize<ModuleManifest>(json, SecureJsonOptions.Manifest)
-            ?? throw new InvalidOperationException($"Failed to parse manifest in '{moduleDir}'.");
+            ?? throw new InvalidOperationException($"Failed to parse manifest in '{canonicalModuleDir}'.");
 
         if (registry.GetModule(manifest.Id) is not null)
             throw new InvalidOperationException($"Module '{manifest.Id}' is already loaded.");
 
-        var host = ExternalModuleHost.Load(moduleDir, manifest, hostServices, loggerFactory);
+        var host = ExternalModuleHost.Load(canonicalModuleDir, manifest, hostServices, loggerFactory);
         try
         {
             registry.Register(host.Module, host);
             registry.CacheManifest(manifest.Id, manifest);
             await host.Module.InitializeAsync(host.Services, ct);
 
-            logger.LogInformation("External module '{ModuleId}' loaded from {Dir}", manifest.Id, moduleDir);
+            logger.LogInformation("External module '{ModuleId}' loaded from {Dir}",
+                PathGuard.SanitizeForLog(manifest.Id), PathGuard.SanitizeForLog(canonicalModuleDir));
             return ToResponse(host.Module, state: null, manifest, isExternal: true);
         }
         catch
@@ -352,7 +366,10 @@ public sealed class ModuleService(
         var loaded = new List<ModuleStateResponse>();
         foreach (var subDir in Directory.EnumerateDirectories(dir))
         {
-            var manifestPath = Path.Combine(subDir, "module.json");
+            // Validate that the enumerated subdirectory is actually inside the
+            // external-modules root (guards against symlink / junction escapes).
+            var canonicalSubDir = PathGuard.EnsureContainedIn(subDir, dir);
+            var manifestPath = Path.Combine(canonicalSubDir, "module.json");
             if (!File.Exists(manifestPath)) continue;
 
             try
@@ -362,7 +379,7 @@ public sealed class ModuleService(
                 if (manifest is null || registry.GetModule(manifest.Id) is not null)
                     continue;
 
-                var result = await LoadExternalAsync(subDir, hostServices, ct);
+                var result = await LoadExternalAsync(canonicalSubDir, hostServices, ct);
                 loaded.Add(result);
             }
             catch (Exception ex)
@@ -374,11 +391,177 @@ public sealed class ModuleService(
         return loaded;
     }
 
+    /// <summary>
+    /// Load an external module from an absolute path on disk (not confined to the
+    /// <c>external-modules/</c> directory). Used for .env-configured external modules.
+    /// </summary>
+    public async Task<ModuleStateResponse> LoadExternalFromAbsolutePathAsync(
+        string absoluteDir, IServiceProvider hostServices, CancellationToken ct = default)
+    {
+        var canonicalDir = Path.GetFullPath(absoluteDir);
+        if (!Directory.Exists(canonicalDir))
+            throw new DirectoryNotFoundException($"External module directory not found: '{canonicalDir}'.");
+
+        var manifestPath = Path.Combine(canonicalDir, "module.json");
+        if (!File.Exists(manifestPath))
+            throw new FileNotFoundException($"No module.json found in '{canonicalDir}'.", manifestPath);
+
+        var json = await File.ReadAllTextAsync(manifestPath, ct);
+        var manifest = System.Text.Json.JsonSerializer.Deserialize<ModuleManifest>(json, SecureJsonOptions.Manifest)
+            ?? throw new InvalidOperationException($"Failed to parse manifest in '{canonicalDir}'.");
+
+        if (registry.GetModule(manifest.Id) is not null)
+            throw new InvalidOperationException($"Module '{manifest.Id}' is already loaded.");
+
+        var host = ExternalModuleHost.Load(canonicalDir, manifest, hostServices, loggerFactory);
+        try
+        {
+            registry.Register(host.Module, host);
+            registry.CacheManifest(manifest.Id, manifest);
+            await host.Module.InitializeAsync(host.Services, ct);
+
+            logger.LogInformation("External module '{ModuleId}' loaded from absolute path {Dir}",
+                PathGuard.SanitizeForLog(manifest.Id), PathGuard.SanitizeForLog(canonicalDir));
+
+            AddExternalModuleToEnv(canonicalDir);
+
+            return ToResponse(host.Module, state: null, manifest, isExternal: true);
+        }
+        catch
+        {
+            registry.Unregister(manifest.Id);
+            await host.DisposeAsync();
+            throw;
+        }
+    }
+
+    /// <summary>
+    /// Load external modules defined in the <c>ExternalModules</c> configuration section.
+    /// Each entry must have a <c>Path</c>; optional <c>Enabled</c> (default <c>true</c>).
+    /// </summary>
+    public async Task<IReadOnlyList<ModuleStateResponse>> LoadExternalModulesFromConfigAsync(
+        IConfiguration config, IServiceProvider hostServices, CancellationToken ct = default)
+    {
+        var section = config.GetSection("ExternalModules");
+        if (!section.Exists()) return [];
+
+        var loaded = new List<ModuleStateResponse>();
+        foreach (var entry in section.GetChildren())
+        {
+            var path = entry["Path"];
+            if (string.IsNullOrWhiteSpace(path))
+            {
+                logger.LogWarning("ExternalModules entry at index {Index} has no Path — skipped", entry.Key);
+                continue;
+            }
+
+            var enabled = true;
+            if (entry["Enabled"] is { } enabledStr && bool.TryParse(enabledStr, out var e))
+                enabled = e;
+
+            if (!enabled)
+            {
+                logger.LogInformation("ExternalModules entry '{Path}' is disabled — skipped",
+                    PathGuard.SanitizeForLog(path));
+                continue;
+            }
+
+            try
+            {
+                var result = await LoadExternalFromAbsolutePathAsync(path, hostServices, ct);
+                loaded.Add(result);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Failed to load .env external module from '{Path}'",
+                    PathGuard.SanitizeForLog(path));
+            }
+        }
+
+        return loaded;
+    }
+
     public static string ResolveExternalModulesDir()
     {
         return Path.Combine(
             Path.GetDirectoryName(typeof(ModuleService).Assembly.Location)!,
             "external-modules");
+    }
+
+    /// <summary>
+    /// Appends an external module path to the <c>ExternalModules</c> array in the
+    /// Core <c>.env</c> file so it persists across restarts. Skips if the path is
+    /// already present. Uses direct file I/O (no auth check) because this is an
+    /// internal server-side operation triggered by module loading.
+    /// </summary>
+    private void AddExternalModuleToEnv(string absoluteDir)
+    {
+        try
+        {
+            var envPath = ResolveEnvFilePath();
+            if (!File.Exists(envPath)) return;
+
+            var content = File.ReadAllText(envPath);
+            var normalised = Path.GetFullPath(absoluteDir).Replace("\\", "\\\\");
+
+            // Already registered — nothing to do.
+            if (content.Contains(normalised, StringComparison.OrdinalIgnoreCase))
+                return;
+
+            var entry = $"    {{ \"Path\": \"{normalised}\", \"Enabled\": true }}";
+
+            // Case 1: ExternalModules array already exists (commented-out or active).
+            //   – Active array: insert before the closing ']'.
+            //   – Commented-out array: uncomment it and insert the entry.
+            var activeArrayIdx = content.IndexOf("\"ExternalModules\": [", StringComparison.Ordinal);
+            if (activeArrayIdx >= 0)
+            {
+                // Find the matching ']'.
+                var closeIdx = content.IndexOf(']', activeArrayIdx);
+                if (closeIdx < 0) return;
+
+                // Check if there's already at least one entry (non-empty array).
+                var slice = content[activeArrayIdx..closeIdx];
+                var hasEntries = slice.Contains('{');
+                var insertion = hasEntries
+                    ? $",\n{entry}"
+                    : $"\n{entry}\n  ";
+
+                content = string.Concat(content.AsSpan(0, closeIdx), insertion, content.AsSpan(closeIdx));
+            }
+            else
+            {
+                // Case 2: No ExternalModules section at all — insert before "Modules".
+                var modulesIdx = content.IndexOf("\"Modules\"", StringComparison.Ordinal);
+                var commentIdx = modulesIdx >= 0
+                    ? content.LastIndexOf("// ── Modules", modulesIdx, StringComparison.Ordinal)
+                    : -1;
+
+                var insertionPoint = commentIdx >= 0
+                    ? commentIdx
+                    : content.LastIndexOf('}');
+
+                if (insertionPoint < 0) return;
+
+                var block = $"\"ExternalModules\": [\n{entry}\n  ],\n\n  ";
+                content = string.Concat(content.AsSpan(0, insertionPoint), block, content.AsSpan(insertionPoint));
+            }
+
+            File.WriteAllText(envPath, content);
+            logger.LogInformation("Added external module path to .env: {Path}",
+                PathGuard.SanitizeForLog(absoluteDir));
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Failed to persist external module path to .env");
+        }
+    }
+
+    private static string ResolveEnvFilePath()
+    {
+        return Path.Combine(
+            Path.GetDirectoryName(typeof(ModuleService).Assembly.Location)!,
+            "Environment", ".env");
     }
 
     // ═══════════════════════════════════════════════════════════════
@@ -426,6 +609,86 @@ public sealed class ModuleService(
 
         await db.SaveChangesAsync(ct);
         return enabledSet;
+    }
+
+    // ═══════════════════════════════════════════════════════════════
+    // Permission reconciliation
+    // ═══════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Backfills wildcard resource grants and global flags introduced by a
+    /// newly enabled module into every existing permission set that already
+    /// uses the <see cref="WellKnownIds.AllResources"/> wildcard for at least
+    /// one resource type. This is the runtime counterpart of
+    /// <c>SeedingService.ReconcileAdminPermissionsAsync</c> and ensures that
+    /// roles created before the module was enabled automatically gain access
+    /// to its resource types and global flags.
+    /// </summary>
+    private async Task ReconcilePermissionsForModuleAsync(
+        ISharpClawModule module, CancellationToken ct)
+    {
+        var newResourceTypes = module.GetResourceTypeDescriptors()
+            .Select(d => d.ResourceType)
+            .ToList();
+        var newFlagKeys = module.GetGlobalFlagDescriptors()
+            .Select(d => d.FlagKey)
+            .ToList();
+
+        if (newResourceTypes.Count == 0 && newFlagKeys.Count == 0)
+            return;
+
+        // Find permission sets that have at least one wildcard grant — these are
+        // the "broad access" sets (typically admin roles) that should be reconciled.
+        var permissionSets = await db.PermissionSets
+            .Include(p => p.ResourceAccesses)
+            .Include(p => p.GlobalFlags)
+            .AsSplitQuery()
+            .Where(p => p.ResourceAccesses.Any(a => a.ResourceId == WellKnownIds.AllResources))
+            .ToListAsync(ct);
+
+        if (permissionSets.Count == 0)
+            return;
+
+        var changed = false;
+
+        foreach (var ps in permissionSets)
+        {
+            foreach (var rt in newResourceTypes)
+            {
+                if (!ps.ResourceAccesses.Any(a =>
+                        a.ResourceType == rt && a.ResourceId == WellKnownIds.AllResources))
+                {
+                    ps.ResourceAccesses.Add(new ResourceAccessDB
+                    {
+                        PermissionSetId = ps.Id,
+                        ResourceType = rt,
+                        ResourceId = WellKnownIds.AllResources,
+                    });
+                    changed = true;
+                }
+            }
+
+            foreach (var flagKey in newFlagKeys)
+            {
+                if (!ps.GlobalFlags.Any(f => f.FlagKey == flagKey))
+                {
+                    ps.GlobalFlags.Add(new GlobalFlagDB
+                    {
+                        PermissionSetId = ps.Id,
+                        FlagKey = flagKey,
+                    });
+                    changed = true;
+                }
+            }
+        }
+
+        if (changed)
+        {
+            logger.LogInformation(
+                "Reconciled permissions for module '{ModuleId}' — backfilled grants into {Count} permission set(s).",
+                module.Id, permissionSets.Count);
+            await db.SaveChangesAsync(ct);
+        }
     }
 
     // ═══════════════════════════════════════════════════════════════

@@ -28,6 +28,18 @@ public sealed partial class FirstSetupPage : Page
 
     private PermissionEditorBuilder? _permEditor;
 
+    // ── Module wizard state ──
+    private TaskCompletionSource<int>? _moduleWizardTcs; // -1=back, 0=skip, 1=next
+    private List<ModulePermissionMetadata>? _sortedModules;
+    private int _moduleIndex;
+    private Dictionary<string, bool> _moduleEnabled = [];
+    private readonly Dictionary<string, StackPanel> _moduleContainers = [];
+    private readonly Stack<int> _wizardHistory = new();
+    private readonly List<string> _lastAutoSkipped = [];
+    private bool _suppressToggle;
+    private bool _suppressGrantAllToggle;
+    private readonly Dictionary<string, bool> _moduleGrantAll = [];
+
     public FirstSetupPage()
     {
         this.InitializeComponent();
@@ -456,9 +468,8 @@ public sealed partial class FirstSetupPage : Page
                 while (true)
                 {
                     ReplaceLastStep("Agent has no role. Set up permissions so it can use tools.");
-                    await BuildPermissionsEditorAsync();
-                    RolePermissionsPanel.Visibility = Visibility.Visible;
                     _roleTcs = new TaskCompletionSource<bool>();
+                    await RunModuleWizardAsync();
                     var roleCreated = await _roleTcs.Task;
                     RolePermissionsPanel.Visibility = Visibility.Collapsed;
 
@@ -766,6 +777,7 @@ public sealed partial class FirstSetupPage : Page
         _apiKeyTcs?.TrySetResult(false);
         _agentTcs?.TrySetResult(null);
         _localModelTcs?.TrySetResult(false);
+        _moduleWizardTcs?.TrySetResult(0);
         _roleTcs?.TrySetResult(false);
         _upgradePromptTcs?.TrySetResult(false);
 
@@ -776,22 +788,411 @@ public sealed partial class FirstSetupPage : Page
         await navigator.NavigateRouteAsync(this, "Main", qualifier: Qualifiers.ClearBackStack);
     }
 
-    private void OnRoleSubmitClick(object sender, RoutedEventArgs e)
-        => _roleTcs?.TrySetResult(true);
-
     private void OnRoleSkipClick(object sender, RoutedEventArgs e)
-        => _roleTcs?.TrySetResult(false);
-
-    private async Task BuildPermissionsEditorAsync()
     {
-        // Build the entire permission editor dynamically, grouped by owning module
+        _moduleWizardTcs?.TrySetResult(0);
+        _roleTcs?.TrySetResult(false);
+    }
+
+    // ── Module wizard ───────────────────────────────────────────
+
+    private async Task RunModuleWizardAsync()
+    {
         _permEditor = new PermissionEditorBuilder(Api)
             .WithGrantClearance(true)
-            .WithFlagClearance(true);
+            .WithFlagClearance(true)
+            .WithManualEditCallback(OnPermissionManuallyEdited);
 
-        DynamicPermissionsContainer.Children.Clear();
         var metadata = await TerminalUI.LoadPermissionMetadataAsync(Api);
-        await _permEditor.BuildGroupedByModuleAsync(DynamicPermissionsContainer, metadata);
+        _sortedModules = TerminalUI.TopologicalSort(metadata);
+
+        _moduleEnabled = new Dictionary<string, bool>();
+        foreach (var m in _sortedModules)
+            _moduleEnabled[m.ModuleId] = m.Enabled;
+
+        _moduleContainers.Clear();
+        _wizardHistory.Clear();
+        _lastAutoSkipped.Clear();
+
+        await _permEditor.EnsureResourcesLoadedAsync();
+
+        // Skip to first navigable module
+        _moduleIndex = 0;
+        _lastAutoSkipped.Clear();
+        while (_moduleIndex < _sortedModules.Count && ShouldAutoDisable(_sortedModules[_moduleIndex]))
+        {
+            _moduleEnabled[_sortedModules[_moduleIndex].ModuleId] = false;
+            _lastAutoSkipped.Add(_sortedModules[_moduleIndex].DisplayName);
+            _moduleIndex++;
+        }
+
+        if (_moduleIndex >= _sortedModules.Count)
+        {
+            // No navigable modules — create role with no permissions
+            _roleTcs?.TrySetResult(true);
+            return;
+        }
+
+        RolePermissionsPanel.Visibility = Visibility.Visible;
+
+        while (_moduleIndex >= 0 && _moduleIndex < _sortedModules.Count)
+        {
+            var module = _sortedModules[_moduleIndex];
+            ShowModuleStep(module);
+
+            _moduleWizardTcs = new TaskCompletionSource<int>();
+            var action = await _moduleWizardTcs.Task;
+
+            if (action == 0) // Skip all
+            {
+                RolePermissionsPanel.Visibility = Visibility.Collapsed;
+                // _roleTcs already resolved by OnRoleSkipClick
+                return;
+            }
+
+            if (action == 1) // Next
+            {
+                _wizardHistory.Push(_moduleIndex);
+                _moduleIndex++;
+
+                // Skip auto-disabled modules
+                _lastAutoSkipped.Clear();
+                while (_moduleIndex < _sortedModules.Count && ShouldAutoDisable(_sortedModules[_moduleIndex]))
+                {
+                    _moduleEnabled[_sortedModules[_moduleIndex].ModuleId] = false;
+                    _lastAutoSkipped.Add(_sortedModules[_moduleIndex].DisplayName);
+                    _moduleIndex++;
+                }
+
+                if (_moduleIndex >= _sortedModules.Count)
+                {
+                    // Finished all modules
+                    RolePermissionsPanel.Visibility = Visibility.Collapsed;
+                    _roleTcs?.TrySetResult(true);
+                    return;
+                }
+            }
+            else // Back (-1)
+            {
+                _lastAutoSkipped.Clear();
+                if (_wizardHistory.Count > 0)
+                    _moduleIndex = _wizardHistory.Pop();
+            }
+        }
+    }
+
+    private void ShowModuleStep(ModulePermissionMetadata module)
+    {
+        ModuleProgressBlock.Text = $"Module {_moduleIndex + 1} of {_sortedModules!.Count}";
+        ModuleWizardTitle.Text = $"── {module.DisplayName} ──";
+
+        // Populate manifest info
+        PopulateManifestPanel(module);
+
+        // Show auto-skipped notice
+        if (_lastAutoSkipped.Count > 0)
+        {
+            ModuleAutoSkippedBlock.Text = $"Auto-disabled (dependency disabled): {string.Join(", ", _lastAutoSkipped)}";
+            ModuleAutoSkippedBlock.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ModuleAutoSkippedBlock.Visibility = Visibility.Collapsed;
+        }
+
+        // Set toggle (suppress handler)
+        _suppressToggle = true;
+        ModuleEnableToggle.IsOn = _moduleEnabled[module.ModuleId];
+        _suppressToggle = false;
+
+        // Module status text
+        UpdateModuleStatusText(_moduleEnabled[module.ModuleId]);
+
+        // Show permissions for enabled modules
+        ModulePermissionsContainer.Children.Clear();
+        if (_moduleEnabled[module.ModuleId])
+        {
+            var hasPermissions = module.GlobalFlags.Count > 0 || module.ResourceTypes.Count > 0;
+
+            ModuleDefaultAgentNotice.Visibility = hasPermissions ? Visibility.Visible : Visibility.Collapsed;
+            GrantAllPanel.Visibility = hasPermissions ? Visibility.Visible : Visibility.Collapsed;
+
+            if (hasPermissions)
+            {
+                // Set grant-all toggle (suppress handler)
+                _suppressGrantAllToggle = true;
+                GrantAllToggle.IsOn = _moduleGrantAll.TryGetValue(module.ModuleId, out var ga) && ga;
+                _suppressGrantAllToggle = false;
+
+                if (!_moduleContainers.TryGetValue(module.ModuleId, out var cached))
+                {
+                    cached = new StackPanel { Spacing = 6 };
+                    _permEditor!.BuildSingleModule(cached, module);
+                    _moduleContainers[module.ModuleId] = cached;
+                }
+
+                // If grant-all is on, apply it to the cached container
+                if (GrantAllToggle.IsOn)
+                    ApplyGrantAll(module);
+
+                ModulePermissionsContainer.Children.Add(cached);
+            }
+            else
+            {
+                var notice = new TextBlock
+                {
+                    Text = "This module has no configurable permissions.",
+                    FontFamily = Mono,
+                    FontSize = 14,
+                    Foreground = TerminalUI.Brush(0x888888),
+                    Margin = new Thickness(0, 4, 0, 0),
+                };
+                ModulePermissionsContainer.Children.Add(notice);
+            }
+
+            ModulePermissionsContainer.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ModuleDefaultAgentNotice.Visibility = Visibility.Collapsed;
+            GrantAllPanel.Visibility = Visibility.Collapsed;
+            ModulePermissionsContainer.Visibility = Visibility.Collapsed;
+        }
+
+        // Back button visibility
+        ModuleBackBtn.Visibility = _wizardHistory.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+
+        // Next button label
+        UpdateNextButtonText();
+    }
+
+    private bool ShouldAutoDisable(ModulePermissionMetadata module)
+    {
+        foreach (var dep in module.DependsOn)
+            if (_moduleEnabled.TryGetValue(dep, out var enabled) && !enabled)
+                return true;
+        return false;
+    }
+
+    private void UpdateNextButtonText()
+    {
+        var isLast = true;
+        for (var i = _moduleIndex + 1; i < _sortedModules!.Count; i++)
+        {
+            if (!ShouldAutoDisable(_sortedModules[i]))
+            {
+                isLast = false;
+                break;
+            }
+        }
+        ModuleNextBtnText.Text = isLast ? "[ Save Permissions ]" : "[ Next Module ]";
+    }
+
+    private void OnModuleEnableToggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressToggle || _sortedModules is null || _moduleIndex >= _sortedModules.Count)
+            return;
+
+        var module = _sortedModules[_moduleIndex];
+        var enabled = ModuleEnableToggle.IsOn;
+        _moduleEnabled[module.ModuleId] = enabled;
+
+        // Update status text
+        UpdateModuleStatusText(enabled);
+
+        ModulePermissionsContainer.Children.Clear();
+
+        if (enabled)
+        {
+            var hasPermissions = module.GlobalFlags.Count > 0 || module.ResourceTypes.Count > 0;
+
+            ModuleDefaultAgentNotice.Visibility = hasPermissions ? Visibility.Visible : Visibility.Collapsed;
+            GrantAllPanel.Visibility = hasPermissions ? Visibility.Visible : Visibility.Collapsed;
+
+            if (hasPermissions)
+            {
+                _suppressGrantAllToggle = true;
+                GrantAllToggle.IsOn = _moduleGrantAll.TryGetValue(module.ModuleId, out var ga) && ga;
+                _suppressGrantAllToggle = false;
+
+                if (!_moduleContainers.TryGetValue(module.ModuleId, out var cached))
+                {
+                    cached = new StackPanel { Spacing = 6 };
+                    _permEditor!.BuildSingleModule(cached, module);
+                    _moduleContainers[module.ModuleId] = cached;
+                }
+
+                if (GrantAllToggle.IsOn)
+                    ApplyGrantAll(module);
+
+                ModulePermissionsContainer.Children.Add(cached);
+            }
+            else
+            {
+                var notice = new TextBlock
+                {
+                    Text = "This module has no configurable permissions.",
+                    FontFamily = Mono,
+                    FontSize = 14,
+                    Foreground = TerminalUI.Brush(0x888888),
+                    Margin = new Thickness(0, 4, 0, 0),
+                };
+                ModulePermissionsContainer.Children.Add(notice);
+            }
+
+            ModulePermissionsContainer.Visibility = Visibility.Visible;
+        }
+        else
+        {
+            ModuleDefaultAgentNotice.Visibility = Visibility.Collapsed;
+            GrantAllPanel.Visibility = Visibility.Collapsed;
+
+            _permEditor!.ClearModuleEntries(module);
+            _moduleContainers.Remove(module.ModuleId);
+            ModulePermissionsContainer.Visibility = Visibility.Collapsed;
+        }
+
+        // Disabling may auto-disable dependents, changing the "last module" status
+        UpdateNextButtonText();
+    }
+
+    private void OnModuleNextClick(object sender, RoutedEventArgs e)
+        => _moduleWizardTcs?.TrySetResult(1);
+
+    private void OnModuleBackClick(object sender, RoutedEventArgs e)
+        => _moduleWizardTcs?.TrySetResult(-1);
+
+    private void UpdateModuleStatusText(bool enabled)
+    {
+        if (enabled)
+        {
+            ModuleStatusBlock.Text = "This module is enabled. Permissions below will be granted to the default agent.";
+            ModuleStatusBlock.Foreground = TerminalUI.Brush(0x00CC66);
+        }
+        else
+        {
+            ModuleStatusBlock.Text = "This module is disabled for all agents.";
+            ModuleStatusBlock.Foreground = TerminalUI.Brush(0xFF6666);
+        }
+    }
+
+    private void PopulateManifestPanel(ModulePermissionMetadata module)
+    {
+        ModuleManifestPanel.Children.Clear();
+
+        // Description
+        if (!string.IsNullOrWhiteSpace(module.Description))
+        {
+            ModuleManifestPanel.Children.Add(new TextBlock
+            {
+                Text = module.Description,
+                FontFamily = Mono,
+                FontSize = 12,
+                Foreground = TerminalUI.Brush(0xCCCCCC),
+                TextWrapping = TextWrapping.Wrap,
+                Margin = new Thickness(0, 0, 0, 4),
+            });
+        }
+
+        // Metadata line: version · author · license · platforms
+        var parts = new List<string>();
+
+        if (!string.IsNullOrWhiteSpace(module.Version))
+            parts.Add($"v{module.Version}");
+        if (!string.IsNullOrWhiteSpace(module.Author))
+            parts.Add(module.Author);
+        if (!string.IsNullOrWhiteSpace(module.License))
+            parts.Add(module.License);
+        if (module.Platforms is { Length: > 0 })
+            parts.Add(string.Join(", ", module.Platforms));
+
+        if (parts.Count > 0)
+        {
+            ModuleManifestPanel.Children.Add(new TextBlock
+            {
+                Text = string.Join("  ·  ", parts),
+                FontFamily = Mono,
+                FontSize = 11,
+                Foreground = TerminalUI.Brush(0x808080),
+                TextWrapping = TextWrapping.Wrap,
+            });
+        }
+
+        // Dependencies
+        if (module.DependsOn.Count > 0)
+        {
+            var depNames = module.DependsOn
+                .Select(depId => _sortedModules?.FirstOrDefault(m => m.ModuleId == depId)?.DisplayName ?? depId)
+                .ToList();
+
+            ModuleManifestPanel.Children.Add(new TextBlock
+            {
+                Text = $"Depends on: {string.Join(", ", depNames)}",
+                FontFamily = Mono,
+                FontSize = 11,
+                Foreground = TerminalUI.Brush(0xAA8844),
+                TextWrapping = TextWrapping.Wrap,
+            });
+        }
+    }
+
+    private void OnGrantAllToggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressGrantAllToggle || _sortedModules is null || _moduleIndex >= _sortedModules.Count)
+            return;
+
+        var module = _sortedModules[_moduleIndex];
+        var grantAll = GrantAllToggle.IsOn;
+        _moduleGrantAll[module.ModuleId] = grantAll;
+
+        if (grantAll)
+        {
+            ApplyGrantAll(module);
+        }
+        else
+        {
+            // Rebuild the module UI from scratch (unchecked state)
+            _permEditor!.ClearModuleEntries(module);
+            _moduleContainers.Remove(module.ModuleId);
+
+            var cached = new StackPanel { Spacing = 6 };
+            _permEditor.BuildSingleModule(cached, module);
+            _moduleContainers[module.ModuleId] = cached;
+
+            ModulePermissionsContainer.Children.Clear();
+            ModulePermissionsContainer.Children.Add(cached);
+        }
+    }
+
+    /// <summary>
+    /// Checks all global-flag checkboxes and ensures a wildcard grant row exists
+    /// for every resource type in the given module.
+    /// </summary>
+    private void ApplyGrantAll(ModulePermissionMetadata module)
+    {
+        if (_permEditor is null) return;
+
+        _permEditor.CheckAllFlags(module);
+        _permEditor.EnsureWildcardGrants(module);
+    }
+
+    /// <summary>
+    /// Called by <see cref="PermissionEditorBuilder"/> when the user manually
+    /// unchecks a flag or removes a grant row. Resets the grant-all toggle
+    /// for the current module.
+    /// </summary>
+    private void OnPermissionManuallyEdited()
+    {
+        if (_sortedModules is null || _moduleIndex >= _sortedModules.Count) return;
+
+        var module = _sortedModules[_moduleIndex];
+        if (_moduleGrantAll.TryGetValue(module.ModuleId, out var ga) && ga)
+        {
+            _moduleGrantAll[module.ModuleId] = false;
+            _suppressGrantAllToggle = true;
+            GrantAllToggle.IsOn = false;
+            _suppressGrantAllToggle = false;
+        }
     }
 
     private async Task CreateRoleAndAssignAsync(Guid agentId)
